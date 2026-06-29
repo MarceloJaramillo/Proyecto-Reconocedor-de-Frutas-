@@ -1,27 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  BarChart3,
-  Boxes,
-  Camera,
-  CheckCircle2,
-  ClipboardCheck,
-  Cpu,
-  Database,
-  History,
-  Layers3,
-  LogOut,
-  Mail,
-  Package,
-  PlusCircle,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  Trash2,
-  UploadCloud,
-  UserPlus,
-  Users
-} from "lucide-react";
 import "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import {
@@ -33,11 +10,9 @@ import {
 } from "./firebase";
 import "./App.css";
 
-const ADMIN_EMAILS = ["michel.jaramillo@utec.edu.pe"]; // CAMBIA ESTE CORREO POR EL GMAIL REAL DEL ADMIN
-
 const DEFAULT_ADMIN = {
   nombre: "Administrador Principal",
-  email:"michel.jaramillo@utec.edu.pe",
+  email: "admin@smartvision.com",
   rol: "Administrador",
   estado: "Activo",
   metodo: "Predeterminado",
@@ -45,9 +20,40 @@ const DEFAULT_ADMIN = {
 };
 
 const STORAGE_KEYS = {
-  users: "spv_users",
-  products: "spv_products",
-  history: "spv_history"
+  users: "fq_users",
+  history: "fq_history"
+};
+
+const FRUITS = {
+  apple: {
+    name: "Manzana",
+    emoji: "🍎",
+    colors: "rojo, verde o amarillo"
+  },
+  banana: {
+    name: "Plátano",
+    emoji: "🍌",
+    colors: "amarillo o verde"
+  },
+  orange: {
+    name: "Naranja",
+    emoji: "🍊",
+    colors: "naranja"
+  }
+};
+
+const EMPTY_RESULT = {
+  status: "waiting",
+  decision: "ESPERANDO",
+  title: "Sin análisis",
+  fruit: "Coloca una fruta",
+  emoji: "🍏",
+  message: "Activa la cámara e inicia el filtro para verificar la fruta.",
+  confidence: 0,
+  quality: 0,
+  damage: 0,
+  spots: 0,
+  colorHealth: 0
 };
 
 function loadStorage(key, fallback) {
@@ -68,90 +74,188 @@ function ensureDefaultAdmin(users) {
   return exists ? users : [DEFAULT_ADMIN, ...users];
 }
 
-function normalizeRole(roleName) {
-  return roleName === "Administrador" ? "admin" : "usuario";
+function normalizeRole(role) {
+  return role === "Administrador" ? "admin" : "user";
 }
 
-function App() {
-  const [role, setRole] = useState(null);
-  const [screen, setScreen] = useState("dashboard");
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function drawRoundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function isHealthyFruitColor(className, r, g, b) {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const saturation = max - min;
+
+  if (className === "banana") {
+    const yellow = r > 115 && g > 95 && b < 145 && Math.abs(r - g) < 95;
+    const green = g > 85 && r > 55 && b < 135;
+    return yellow || green;
+  }
+
+  if (className === "apple") {
+    const red = r > 105 && r > g * 1.08 && r > b * 1.12;
+    const green = g > 85 && g > b * 1.08 && g > r * 0.75;
+    const yellow = r > 115 && g > 90 && b < 140;
+    return saturation > 24 && (red || green || yellow);
+  }
+
+  if (className === "orange") {
+    return r > 125 && g > 55 && g < 180 && b < 145 && r > b * 1.18;
+  }
+
+  return false;
+}
+
+function isDamagedPixel(r, g, b) {
+  const avg = (r + g + b) / 3;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const saturation = max - min;
+
+  const veryDark = avg < 42;
+  const darkBrown = r > 35 && g > 20 && b < 95 && avg < 130 && r >= g * 0.85 && g >= b * 1.02;
+  const blackSpot = avg < 70 && saturation < 48;
+  const grayRot = saturation < 18 && avg > 45 && avg < 155;
+
+  return veryDark || darkBrown || blackSpot || grayRot;
+}
+
+function analyzeFruitQuality(video, bbox, className) {
+  const [rawX, rawY, rawW, rawH] = bbox;
+  const videoWidth = video.videoWidth || 1;
+  const videoHeight = video.videoHeight || 1;
+
+  const x = clamp(Math.round(rawX), 0, videoWidth - 1);
+  const y = clamp(Math.round(rawY), 0, videoHeight - 1);
+  const w = clamp(Math.round(rawW), 1, videoWidth - x);
+  const h = clamp(Math.round(rawH), 1, videoHeight - y);
+
+  const sampleSize = 150;
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = sampleSize;
+  tempCanvas.height = sampleSize;
+
+  const ctx = tempCanvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    return {
+      status: "review",
+      decision: "REVISAR",
+      title: "REVISAR",
+      message: "No se pudo analizar la fruta. Intenta nuevamente.",
+      quality: 50,
+      damage: 0,
+      spots: 0,
+      colorHealth: 0
+    };
+  }
+
+  ctx.drawImage(video, x, y, w, h, 0, 0, sampleSize, sampleSize);
+
+  const { data } = ctx.getImageData(0, 0, sampleSize, sampleSize);
+
+  let usefulPixels = 0;
+  let healthyPixels = 0;
+  let damagedPixels = 0;
+  let darkSpots = 0;
+
+  for (let py = 0; py < sampleSize; py += 2) {
+    for (let px = 0; px < sampleSize; px += 2) {
+      const dx = (px - sampleSize / 2) / (sampleSize / 2);
+      const dy = (py - sampleSize / 2) / (sampleSize / 2);
+
+      if (dx * dx + dy * dy > 0.92) continue;
+
+      const index = (py * sampleSize + px) * 4;
+      const r = data[index];
+      const g = data[index + 1];
+      const b = data[index + 2];
+
+      const avg = (r + g + b) / 3;
+      const saturation = Math.max(r, g, b) - Math.min(r, g, b);
+      const healthy = isHealthyFruitColor(className, r, g, b);
+      const damaged = isDamagedPixel(r, g, b);
+
+      const looksLikeFruitArea = healthy || damaged || saturation > 30 || avg > 60;
+      if (!looksLikeFruitArea) continue;
+
+      usefulPixels += 1;
+
+      if (healthy) healthyPixels += 1;
+      if (damaged) damagedPixels += 1;
+      if (avg < 58) darkSpots += 1;
+    }
+  }
+
+  const safeTotal = Math.max(usefulPixels, 1);
+  const damageRatio = damagedPixels / safeTotal;
+  const darkRatio = darkSpots / safeTotal;
+  const colorRatio = healthyPixels / safeTotal;
+
+  const quality = Math.round(
+    clamp(92 + colorRatio * 18 - damageRatio * 260 - darkRatio * 120, 0, 100)
+  );
+
+  let status = "review";
+  let decision = "REVISAR";
+  let title = "REVISAR";
+  let message = "La fruta tiene señales dudosas. Se recomienda revisión manual.";
+
+  if (damageRatio >= 0.18 || darkRatio >= 0.16 || quality < 48) {
+    status = "bad";
+    decision = "RECHAZADO";
+    title = "MAL ESTADO";
+    message = "Se detectaron manchas oscuras o zonas deterioradas. La fruta no pasa el filtro.";
+  } else if (damageRatio <= 0.08 && darkRatio <= 0.08 && quality >= 72) {
+    status = "good";
+    decision = "APROBADO";
+    title = "BUEN ESTADO";
+    message = "La fruta presenta buen color y pocas señales de deterioro. Pasa el filtro.";
+  }
+
+  return {
+    status,
+    decision,
+    title,
+    message,
+    quality,
+    damage: Math.round(damageRatio * 100),
+    spots: Math.round(darkRatio * 100),
+    colorHealth: Math.round(colorRatio * 100)
+  };
+}
+
+function pickBestFruit(predictions) {
+  return predictions
+    .filter((item) => FRUITS[item.class] && item.score >= 0.45)
+    .sort((a, b) => b.score * b.bbox[2] * b.bbox[3] - a.score * a.bbox[2] * a.bbox[3])[0];
+}
+
+export default function App() {
+  const [users, setUsers] = useState(() =>
+    ensureDefaultAdmin(loadStorage(STORAGE_KEYS.users, [DEFAULT_ADMIN]))
+  );
+  const [history, setHistory] = useState(() => loadStorage(STORAGE_KEYS.history, []));
   const [currentUser, setCurrentUser] = useState(null);
   const [pendingGoogleUser, setPendingGoogleUser] = useState(null);
   const [registrationName, setRegistrationName] = useState("");
-
-  const [aiModel, setAiModel] = useState(null);
-  const [modelReady, setModelReady] = useState(false);
-  const [modelStatus, setModelStatus] = useState("Cargando modelo IA...");
-
-  const [scanDone, setScanDone] = useState(false);
-  const [scanLoading, setScanLoading] = useState(false);
-  const [scanStage, setScanStage] = useState("Esperando imagen");
-  const [imagePreview, setImagePreview] = useState(null);
-  const [cameraActive, setCameraActive] = useState(false);
-  const [detectedProducts, setDetectedProducts] = useState([]);
-  const [googleLoading, setGoogleLoading] = useState(false);
-
-  const videoRef = useRef(null);
-  const captureCanvasRef = useRef(null);
-  const imageRef = useRef(null);
-  const overlayRef = useRef(null);
-
-  const [products, setProducts] = useState(() =>
-    loadStorage(STORAGE_KEYS.products, [
-      {
-        codigo: "P001",
-        nombre: "Botella",
-        categoria: "Bebidas",
-        estado: "Activo"
-      },
-      {
-        codigo: "P002",
-        nombre: "Vaso / taza",
-        categoria: "Bebidas",
-        estado: "Activo"
-      },
-      {
-        codigo: "P003",
-        nombre: "Libro / caja",
-        categoria: "Inventario",
-        estado: "Activo"
-      }
-    ])
-  );
-
-  const [users, setUsers] = useState(() =>
-    ensureDefaultAdmin(
-      loadStorage(STORAGE_KEYS.users, [
-        DEFAULT_ADMIN,
-        {
-          nombre: "Usuario Demo",
-          email: "usuario@demo.com",
-          rol: "Usuario",
-          estado: "Activo",
-          metodo: "Demo",
-          protegido: false
-        }
-      ])
-    )
-  );
-
-  const [historyLog, setHistoryLog] = useState(() =>
-    loadStorage(STORAGE_KEYS.history, [
-      {
-        fecha: "20/05/2026",
-        usuario: "Usuario Demo",
-        resultado: "9 productos detectados",
-        estado: "Validado"
-      }
-    ])
-  );
-
-  const [newProduct, setNewProduct] = useState({
-    codigo: "",
-    nombre: "",
-    categoria: "",
-    estado: "Activo"
-  });
+  const [activeView, setActiveView] = useState("scanner");
 
   const [newUser, setNewUser] = useState({
     nombre: "",
@@ -162,335 +266,194 @@ function App() {
     protegido: false
   });
 
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [modelReady, setModelReady] = useState(false);
+  const [modelStatus, setModelStatus] = useState("Modelo pendiente");
+  const [cameraOn, setCameraOn] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(EMPTY_RESULT);
+
+  const modelRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const animationRef = useRef(null);
+  const scanningRef = useRef(false);
+  const detectingRef = useRef(false);
+  const lastSavedRef = useRef("");
+  const lastSavedAtRef = useRef(0);
+
+  const role = currentUser ? normalizeRole(currentUser.rol) : null;
+  const isAdmin = role === "admin";
+
+  const dashboardStats = useMemo(() => {
+    const approved = history.filter((item) => item.decision === "APROBADO").length;
+    const rejected = history.filter((item) => item.decision === "RECHAZADO").length;
+    const review = history.filter((item) => item.decision === "REVISAR").length;
+
+    return {
+      total: history.length,
+      approved,
+      rejected,
+      review
+    };
+  }, [history]);
+
   useEffect(() => {
     saveStorage(STORAGE_KEYS.users, users);
   }, [users]);
 
   useEffect(() => {
-    saveStorage(STORAGE_KEYS.products, products);
-  }, [products]);
+    saveStorage(STORAGE_KEYS.history, history);
+  }, [history]);
 
   useEffect(() => {
-    saveStorage(STORAGE_KEYS.history, historyLog);
-  }, [historyLog]);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const loadModel = async () => {
-      try {
-        setModelStatus("Cargando modelo IA...");
-        const model = await cocoSsd.load();
-
-        if (isMounted) {
-          setAiModel(model);
-          setModelReady(true);
-          setModelStatus("Modelo IA listo");
-          setScanStage("Modelo IA listo");
-        }
-      } catch (error) {
-        console.error(error);
-        setModelStatus("Error al cargar modelo IA");
-        setModelReady(false);
-      }
-    };
-
-    loadModel();
-
     return () => {
-      isMounted = false;
+      stopCamera();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const totalDetected = useMemo(() => {
-    return detectedProducts.reduce((acc, item) => acc + item.cantidad, 0);
-  }, [detectedProducts]);
+  const loadModel = async () => {
+    if (modelRef.current) return modelRef.current;
 
-  const menuUsuario = [
-    { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={20} /> },
-    { id: "scan", label: "Escanear productos", icon: <Camera size={20} /> },
-    { id: "history", label: "Historial", icon: <History size={20} /> }
-  ];
-
-  const menuAdmin = [
-    { id: "dashboard", label: "Dashboard", icon: <BarChart3 size={20} /> },
-    { id: "products", label: "Productos", icon: <Package size={20} /> },
-    { id: "users", label: "Usuarios", icon: <Users size={20} /> },
-    { id: "history", label: "Historial", icon: <History size={20} /> }
-  ];
-
-  const screenTitle = {
-    dashboard: "Dashboard general",
-    scan: "Reconocimiento de productos",
-    history: "Historial de conteos",
-    products: "Gestión de productos",
-    users: "Gestión de usuarios"
-  };
-
-  const menu = role === "admin" ? menuAdmin : menuUsuario;
-
-  const translateClass = (className) => {
-    const labels = {
-      bottle: "Botella",
-      cup: "Vaso / taza",
-      bowl: "Bowl",
-      banana: "Plátano",
-      apple: "Manzana",
-      orange: "Naranja",
-      sandwich: "Sándwich",
-      pizza: "Pizza",
-      cake: "Queque / torta",
-      book: "Libro / caja",
-      "cell phone": "Celular",
-      laptop: "Laptop",
-      keyboard: "Teclado",
-      mouse: "Mouse",
-      remote: "Control remoto",
-      chair: "Silla",
-      person: "Persona",
-      backpack: "Mochila",
-      handbag: "Bolsa",
-      suitcase: "Maleta",
-      tv: "Televisor"
-    };
-
-    return labels[className] || className;
-  };
-
-  const getCategory = (className) => {
-    const food = ["banana", "apple", "orange", "sandwich", "pizza", "cake"];
-    const drinks = ["bottle", "cup"];
-    const tech = ["cell phone", "laptop", "keyboard", "mouse", "remote", "tv"];
-    const inventory = ["book", "backpack", "handbag", "suitcase"];
-
-    if (food.includes(className)) return "Alimentos";
-    if (drinks.includes(className)) return "Bebidas";
-    if (tech.includes(className)) return "Tecnología";
-    if (inventory.includes(className)) return "Inventario";
-
-    return "Objeto detectado";
-  };
-
-  const groupPredictions = (predictions) => {
-    const grouped = {};
-
-    predictions.forEach((prediction) => {
-      const key = prediction.class;
-
-      if (!grouped[key]) {
-        grouped[key] = {
-          producto: translateClass(key),
-          categoria: getCategory(key),
-          cantidad: 0,
-          confianzaTotal: 0
-        };
-      }
-
-      grouped[key].cantidad += 1;
-      grouped[key].confianzaTotal += prediction.score;
+    setError("");
+    setModelStatus("Cargando modelo IA...");
+    setResult({
+      ...EMPTY_RESULT,
+      status: "loading",
+      decision: "CARGANDO",
+      title: "Cargando IA",
+      message: "Preparando el modelo de reconocimiento de frutas."
     });
-
-    return Object.values(grouped).map((item) => ({
-      producto: item.producto,
-      categoria: item.categoria,
-      cantidad: item.cantidad,
-      confianza: `${Math.round((item.confianzaTotal / item.cantidad) * 100)}%`
-    }));
-  };
-
-  const drawPredictions = (predictions) => {
-    const canvas = overlayRef.current;
-    const image = imageRef.current;
-
-    if (!canvas || !image) return;
-
-    const displayWidth = image.clientWidth;
-    const displayHeight = image.clientHeight;
-
-    if (!displayWidth || !displayHeight || !image.naturalWidth) return;
-
-    canvas.width = displayWidth;
-    canvas.height = displayHeight;
-
-    const context = canvas.getContext("2d");
-    context.clearRect(0, 0, canvas.width, canvas.height);
-
-    const scaleX = displayWidth / image.naturalWidth;
-    const scaleY = displayHeight / image.naturalHeight;
-
-    predictions.forEach((prediction) => {
-      const [x, y, width, height] = prediction.bbox;
-
-      const boxX = x * scaleX;
-      const boxY = y * scaleY;
-      const boxWidth = width * scaleX;
-      const boxHeight = height * scaleY;
-
-      const label = `${translateClass(prediction.class)} ${Math.round(
-        prediction.score * 100
-      )}%`;
-
-      context.strokeStyle = "#22c55e";
-      context.lineWidth = 3;
-      context.strokeRect(boxX, boxY, boxWidth, boxHeight);
-
-      context.fillStyle = "#22c55e";
-      context.font = "bold 14px Arial";
-      context.fillRect(
-        boxX,
-        boxY > 28 ? boxY - 28 : boxY,
-        label.length * 8.5,
-        26
-      );
-
-      context.fillStyle = "#ffffff";
-      context.fillText(label, boxX + 6, boxY > 28 ? boxY - 10 : boxY + 18);
-    });
-  };
-
-  const accessWithUser = (systemUser) => {
-    if (systemUser.estado !== "Activo") {
-      alert("Tu usuario está inactivo. Contacta al administrador.");
-      return;
-    }
-
-    setCurrentUser(systemUser);
-    setRole(normalizeRole(systemUser.rol));
-    setScreen("dashboard");
-  };
-
-  const handleGoogleAccess = async () => {
-    if (!hasFirebaseConfig || !auth || !googleProvider) {
-      alert("Firebase todavía no está configurado correctamente.");
-      return;
-    }
 
     try {
-      setGoogleLoading(true);
+      const model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+      modelRef.current = model;
+      setModelReady(true);
+      setModelStatus("Modelo IA listo");
 
-      const result = await signInWithPopup(auth, googleProvider);
-      const googleUser = result.user;
-      const email = googleUser.email || "";
-      const name = googleUser.displayName || "";
+      setResult({
+        ...EMPTY_RESULT,
+        status: "ready",
+        decision: "LISTO",
+        title: "IA lista",
+        message: "Activa la cámara para iniciar el filtro."
+      });
 
-      const isAdminEmail = ADMIN_EMAILS.includes(email);
+      return model;
+    } catch (err) {
+      console.error(err);
+      setModelStatus("Error cargando IA");
+      setError("No se pudo cargar el modelo. Revisa tu internet y las dependencias.");
+      throw err;
+    }
+  };
 
-      if (isAdminEmail) {
-        const adminUser = {
-          nombre: name || "Administrador",
-          email,
-          rol: "Administrador",
-          estado: "Activo",
-          metodo: "Google",
-          protegido: true
-        };
+  const loginAsDefaultAdmin = () => {
+    const admin = users.find((user) => user.email === DEFAULT_ADMIN.email) || DEFAULT_ADMIN;
+    setCurrentUser(admin);
+    setActiveView("scanner");
+  };
 
-        setUsers((prevUsers) => {
-          const exists = prevUsers.some((user) => user.email === email);
-          if (exists) {
-            return prevUsers.map((user) =>
-              user.email === email ? { ...user, ...adminUser } : user
-            );
-          }
-          return [adminUser, ...prevUsers];
-        });
+  const handleGoogleLogin = async () => {
+    if (!hasFirebaseConfig) {
+      setError("Firebase no está configurado.");
+      return;
+    }
 
-        accessWithUser(adminUser);
-        return;
-      }
+    setGoogleLoading(true);
+    setError("");
 
-      const existingUser = users.find((user) => user.email === email);
+    try {
+      const response = await signInWithPopup(auth, googleProvider);
+      const googleUser = response.user;
+      const existingUser = users.find((user) => user.email === googleUser.email);
 
       if (existingUser) {
-        accessWithUser(existingUser);
+        if (existingUser.estado !== "Activo") {
+          setError("Tu usuario está inactivo. Solicita activación al administrador.");
+          await signOut(auth);
+          return;
+        }
+
+        setCurrentUser(existingUser);
+        setActiveView("scanner");
         return;
       }
 
       setPendingGoogleUser({
-        nombre: name,
-        email,
-        metodo: "Google"
+        nombre: googleUser.displayName || "",
+        email: googleUser.email,
+        photoURL: googleUser.photoURL || ""
       });
-
-      setRegistrationName(name || "");
-    } catch (error) {
-      console.error(error);
-      alert("No se pudo iniciar sesión con Google.");
+      setRegistrationName(googleUser.displayName || "");
+    } catch (err) {
+      console.error(err);
+      setError("No se pudo iniciar sesión con Gmail.");
     } finally {
       setGoogleLoading(false);
     }
   };
 
-  const completeUserRegistration = (event) => {
-    event.preventDefault();
-
+  const completeRegistration = () => {
     if (!pendingGoogleUser) return;
 
-    if (registrationName.trim() === "") {
-      alert("Ingresa tu nombre para completar el registro.");
-      return;
-    }
+    const name = registrationName.trim() || pendingGoogleUser.nombre || "Usuario nuevo";
 
-    const userToCreate = {
-      nombre: registrationName.trim(),
+    const createdUser = {
+      nombre: name,
       email: pendingGoogleUser.email,
       rol: "Usuario",
       estado: "Activo",
-      metodo: "Google",
+      metodo: "Gmail",
       protegido: false
     };
 
-    setUsers((prevUsers) => [userToCreate, ...prevUsers]);
+    setUsers((prev) => ensureDefaultAdmin([...prev, createdUser]));
+    setCurrentUser(createdUser);
     setPendingGoogleUser(null);
     setRegistrationName("");
-    accessWithUser(userToCreate);
+    setActiveView("scanner");
   };
 
-  const cancelRegistration = async () => {
-    if (auth) {
-      try {
-        await signOut(auth);
-      } catch (error) {
-        console.error(error);
-      }
+  const handleLogout = async () => {
+    stopCamera();
+    setCurrentUser(null);
+    setPendingGoogleUser(null);
+    setActiveView("scanner");
+
+    try {
+      await signOut(auth);
+    } catch {
+      // Si no hay sesión real de Firebase, no hacemos nada.
     }
-
-    setPendingGoogleUser(null);
-    setRegistrationName("");
   };
 
-  const loginAsDefaultAdmin = () => {
-    accessWithUser(DEFAULT_ADMIN);
-  };
-
-  const handleCreateUser = (event) => {
+  const addUser = (event) => {
     event.preventDefault();
 
-    if (
-      newUser.nombre.trim() === "" ||
-      newUser.email.trim() === "" ||
-      newUser.rol.trim() === ""
-    ) {
-      alert("Completa nombre, correo y rol del usuario.");
+    const cleanEmail = newUser.email.trim().toLowerCase();
+    const cleanName = newUser.nombre.trim();
+
+    if (!cleanName || !cleanEmail) {
+      setError("Completa nombre y correo del usuario.");
       return;
     }
 
-    const emailExists = users.some(
-      (user) => user.email.toLowerCase() === newUser.email.toLowerCase()
-    );
-
-    if (emailExists) {
-      alert("Ya existe un usuario con ese correo.");
+    if (users.some((user) => user.email.toLowerCase() === cleanEmail)) {
+      setError("Ese correo ya existe.");
       return;
     }
 
-    setUsers([
+    setUsers((prev) => [
+      ...prev,
       {
         ...newUser,
-        nombre: newUser.nombre.trim(),
-        email: newUser.email.trim().toLowerCase()
-      },
-      ...users
+        nombre: cleanName,
+        email: cleanEmail
+      }
     ]);
 
     setNewUser({
@@ -501,1021 +464,697 @@ function App() {
       metodo: "Creado por admin",
       protegido: false
     });
+    setError("");
   };
 
-  const handleDeleteUser = (email) => {
-    const userToDelete = users.find((user) => user.email === email);
+  const deleteUser = (email) => {
+    const selected = users.find((user) => user.email === email);
+    if (!selected || selected.protegido) return;
 
-    if (!userToDelete) return;
-
-    if (userToDelete.protegido) {
-      alert("No puedes eliminar al administrador predeterminado.");
-      return;
-    }
+    setUsers((prev) => prev.filter((user) => user.email !== email));
 
     if (currentUser?.email === email) {
-      alert("No puedes eliminar tu propio usuario mientras estás conectado.");
-      return;
+      handleLogout();
     }
-
-    const confirmDelete = confirm(`¿Eliminar al usuario ${userToDelete.nombre}?`);
-
-    if (!confirmDelete) return;
-
-    setUsers(users.filter((user) => user.email !== email));
   };
 
-  const handleAddProduct = (event) => {
-    event.preventDefault();
-
-    if (
-      newProduct.codigo.trim() === "" ||
-      newProduct.nombre.trim() === "" ||
-      newProduct.categoria.trim() === ""
-    ) {
-      alert("Completa código, nombre y categoría del producto.");
-      return;
-    }
-
-    setProducts([...products, newProduct]);
-
-    setNewProduct({
-      codigo: "",
-      nombre: "",
-      categoria: "",
-      estado: "Activo"
-    });
+  const updateUserStatus = (email, estado) => {
+    setUsers((prev) =>
+      prev.map((user) => (user.email === email && !user.protegido ? { ...user, estado } : user))
+    );
   };
 
-  const handleImageUpload = (event) => {
-    const file = event.target.files[0];
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    if (!file) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
-    const imageUrl = URL.createObjectURL(file);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  };
 
-    setImagePreview(imageUrl);
-    setScanDone(false);
-    setScanLoading(false);
-    setDetectedProducts([]);
-    setScanStage("Imagen cargada");
+  const syncCanvas = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    if (!video || !canvas) return false;
+
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+
+    return true;
   };
 
   const startCamera = async () => {
+    setError("");
+
     try {
+      await loadModel();
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Navegador sin soporte de cámara");
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: "environment"
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
         },
         audio: false
       });
 
-      setCameraActive(true);
-      setScanDone(false);
-      setScanLoading(false);
-      setDetectedProducts([]);
-      setScanStage("Cámara activa");
+      streamRef.current = stream;
 
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play();
-        }
-      }, 150);
-    } catch (error) {
-      console.error(error);
-      alert("No se pudo acceder a la cámara. Puedes subir una imagen manualmente.");
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      setCameraOn(true);
+      setResult({
+        ...EMPTY_RESULT,
+        status: "ready",
+        decision: "LISTO",
+        title: "Cámara activa",
+        message: "Coloca una manzana, plátano o naranja frente al filtro."
+      });
+    } catch (err) {
+      console.error(err);
+      setError("No se pudo activar la cámara. Acepta el permiso del navegador.");
+    }
+  };
+
+  const stopScanning = () => {
+    scanningRef.current = false;
+    detectingRef.current = false;
+    setScanning(false);
+
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
     }
   };
 
   const stopCamera = () => {
-    const stream = videoRef.current?.srcObject;
+    stopScanning();
 
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
     }
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
 
-    setCameraActive(false);
+    clearCanvas();
+    setCameraOn(false);
+    setResult(EMPTY_RESULT);
   };
 
-  const captureFrame = () => {
+  const drawEmpty = () => {
+    const canvas = canvasRef.current;
+    if (!canvas || !syncCanvas()) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const boxWidth = Math.min(canvas.width - 60, 560);
+    const boxHeight = 96;
+    const x = (canvas.width - boxWidth) / 2;
+    const y = (canvas.height - boxHeight) / 2;
+
+    ctx.fillStyle = "rgba(6, 19, 16, 0.76)";
+    drawRoundRect(ctx, x, y, boxWidth, boxHeight, 24);
+    ctx.fill();
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 28px Arial";
+    ctx.fillText("Coloca una fruta en el filtro", canvas.width / 2, y + 40);
+
+    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    ctx.font = "500 18px Arial";
+    ctx.fillText("Manzana · Plátano · Naranja", canvas.width / 2, y + 68);
+    ctx.textAlign = "left";
+  };
+
+  const drawDetection = (prediction, qualityResult) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !syncCanvas()) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const [x, y, w, h] = prediction.bbox;
+    const color =
+      qualityResult.status === "good"
+        ? "#22c55e"
+        : qualityResult.status === "bad"
+          ? "#ef4444"
+          : "#f59e0b";
+
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 22;
+    ctx.strokeRect(x, y, w, h);
+    ctx.shadowBlur = 0;
+
+    const label = `${FRUITS[prediction.class].name} · ${qualityResult.title}`;
+    ctx.font = "700 28px Arial";
+    const textWidth = ctx.measureText(label).width;
+    const labelWidth = textWidth + 34;
+    const labelHeight = 48;
+    const labelX = clamp(x, 12, canvas.width - labelWidth - 12);
+    const labelY = y > 62 ? y - 18 : y + 64;
+
+    ctx.fillStyle = "rgba(6, 19, 16, 0.88)";
+    drawRoundRect(ctx, labelX, labelY - 40, labelWidth, labelHeight, 16);
+    ctx.fill();
+
+    ctx.fillStyle = color;
+    ctx.fillText(label, labelX + 17, labelY - 8);
+  };
+
+  const saveResultToHistory = (fruitInfo, qualityResult, confidence) => {
+    if (!currentUser) return;
+    if (!["APROBADO", "RECHAZADO", "REVISAR"].includes(qualityResult.decision)) return;
+
+    const signature = `${fruitInfo.name}-${qualityResult.decision}`;
+    const now = new Date();
+
+    if (lastSavedRef.current === signature && now.getTime() - lastSavedAtRef.current < 5000) {
+      return;
+    }
+
+    lastSavedRef.current = signature;
+    lastSavedAtRef.current = now.getTime();
+
+    const id =
+      globalThis.crypto && globalThis.crypto.randomUUID
+        ? globalThis.crypto.randomUUID()
+        : String(now.getTime());
+
+    setHistory((prev) => [
+      {
+        id,
+        fecha: now.toLocaleString("es-PE"),
+        usuario: currentUser.nombre,
+        fruta: fruitInfo.name,
+        decision: qualityResult.decision,
+        calidad: qualityResult.quality,
+        danio: qualityResult.damage,
+        confianza: confidence
+      },
+      ...prev.slice(0, 49)
+    ]);
+  };
+
+  const scanFrame = async () => {
+    if (!scanningRef.current) return;
+
+    if (detectingRef.current) {
+      animationRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+
     const video = videoRef.current;
-    const canvas = captureCanvasRef.current;
+    const model = modelRef.current;
 
-    if (!video || !cameraActive) {
-      alert("Primero activa la cámara.");
+    if (!video || !model || video.readyState < 2) {
+      animationRef.current = requestAnimationFrame(scanFrame);
       return;
     }
 
-    if (!video.videoWidth || !video.videoHeight) {
-      alert("La cámara aún está cargando. Intenta nuevamente en unos segundos.");
-      return;
-    }
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    const context = canvas.getContext("2d");
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    const imageData = canvas.toDataURL("image/png");
-
-    setImagePreview(imageData);
-    setScanDone(false);
-    setScanLoading(false);
-    setDetectedProducts([]);
-    setScanStage("Imagen capturada");
-  };
-
-  const runRealAIRecognition = async () => {
-    if (!imagePreview) {
-      alert("Primero sube una imagen o captura una foto con la cámara.");
-      return;
-    }
-
-    if (!aiModel || !modelReady) {
-      alert("El modelo de IA todavía está cargando. Intenta nuevamente.");
-      return;
-    }
-
-    const image = imageRef.current;
-
-    if (!image) {
-      alert("No se encontró la imagen para analizar.");
-      return;
-    }
+    detectingRef.current = true;
 
     try {
-      setScanDone(false);
-      setScanLoading(true);
-      setDetectedProducts([]);
-      setScanStage("Procesando imagen con IA real...");
+      const predictions = await model.detect(video);
+      const bestFruit = pickBestFruit(predictions);
 
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (!bestFruit) {
+        drawEmpty();
 
-      setScanStage("Detectando objetos con visión computacional...");
+        setResult({
+          ...EMPTY_RESULT,
+          status: "searching",
+          decision: "SIN FRUTA",
+          title: "Buscando fruta",
+          message: "El sistema solo acepta manzana, plátano o naranja."
+        });
+      } else {
+        const qualityResult = analyzeFruitQuality(video, bestFruit.bbox, bestFruit.class);
+        const fruitInfo = FRUITS[bestFruit.class];
+        const confidence = Math.round(bestFruit.score * 100);
 
-      const predictions = await aiModel.detect(image);
+        drawDetection(bestFruit, qualityResult);
 
-      const filteredPredictions = predictions.filter(
-        (prediction) => prediction.score >= 0.45
-      );
+        setResult({
+          ...qualityResult,
+          fruit: fruitInfo.name,
+          emoji: fruitInfo.emoji,
+          confidence
+        });
 
-      const groupedProducts = groupPredictions(filteredPredictions);
-      const total = groupedProducts.reduce((acc, item) => acc + item.cantidad, 0);
+        saveResultToHistory(fruitInfo, qualityResult, confidence);
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Ocurrió un error durante el filtro. Detén e inicia nuevamente.");
+    } finally {
+      detectingRef.current = false;
 
-      setDetectedProducts(groupedProducts);
-
-      setTimeout(() => {
-        drawPredictions(filteredPredictions);
-      }, 100);
-
-      setHistoryLog((prevHistory) => [
-        {
-          fecha: new Date().toLocaleString("es-PE"),
-          usuario: currentUser?.nombre || "Usuario",
-          resultado:
-            total > 0
-              ? `${total} objetos detectados por IA`
-              : "Sin detecciones confiables",
-          estado: total > 0 ? "Validado" : "Pendiente"
-        },
-        ...prevHistory
-      ]);
-
-      setScanLoading(false);
-      setScanDone(true);
-      setScanStage("Análisis completado");
-    } catch (error) {
-      console.error(error);
-      setScanLoading(false);
-      setScanDone(false);
-      setScanStage("Error durante el análisis IA");
-      alert("Ocurrió un error al analizar la imagen con IA.");
-    }
-  };
-
-  const logout = async () => {
-    stopCamera();
-
-    if (auth) {
-      try {
-        await signOut(auth);
-      } catch (error) {
-        console.error(error);
+      if (scanningRef.current) {
+        setTimeout(() => {
+          animationRef.current = requestAnimationFrame(scanFrame);
+        }, 450);
       }
     }
-
-    setRole(null);
-    setCurrentUser(null);
-    setPendingGoogleUser(null);
-    setScreen("dashboard");
-    setScanDone(false);
-    setScanLoading(false);
-    setImagePreview(null);
-    setDetectedProducts([]);
-    setScanStage("Esperando imagen");
   };
 
-  if (pendingGoogleUser && !role) {
+  const startScanning = async () => {
+    setError("");
+
+    try {
+      if (!cameraOn) {
+        await startCamera();
+      }
+
+      await loadModel();
+
+      scanningRef.current = true;
+      lastSavedRef.current = "";
+      lastSavedAtRef.current = 0;
+      setScanning(true);
+
+      setResult({
+        ...EMPTY_RESULT,
+        status: "searching",
+        decision: "ESCANEANDO",
+        title: "Filtro activo",
+        message: "Mantén la fruta dentro de la cámara para evaluar su estado."
+      });
+
+      animationRef.current = requestAnimationFrame(scanFrame);
+    } catch (err) {
+      console.error(err);
+      setError("No se pudo iniciar el filtro. Revisa cámara, permisos o conexión.");
+    }
+  };
+
+  if (!currentUser && !pendingGoogleUser) {
     return (
-      <div className="registration-shell">
-        <div className="registration-card">
-          <div className="brand-mark small">
-            <UserPlus size={28} />
+      <main className="login-page">
+        <section className="login-card">
+          <div className="login-hero">
+            <span className="project-pill">Cognitive Computing Project</span>
+            <div className="logo-orb">🍍</div>
+            <h1>Fruit Quality AI</h1>
+            <p>
+              Plataforma con cámara e inteligencia artificial para verificar si una fruta está en
+              buen estado antes de pasar el filtro.
+            </p>
+
+            <div className="features-row">
+              <span>🍎 Frutas</span>
+              <span>📷 Cámara</span>
+              <span>🤖 IA</span>
+              <span>✅ Calidad</span>
+            </div>
           </div>
 
-          <p className="eyebrow">Registro de usuario</p>
+          <div className="login-panel">
+            <span className="section-tag">Acceso al sistema</span>
+            <h2>Ingresa para usar el filtro</h2>
+            <p>
+              Los usuarios nuevos ingresan con Gmail y completan su registro. El administrador
+              predeterminado ya existe.
+            </p>
 
-          <h1>Completa tu registro</h1>
+            <div className="login-actions">
+              <button className="primary-button" onClick={handleGoogleLogin} disabled={googleLoading}>
+                {googleLoading ? "Conectando..." : "Ingresar / Registrarse con Gmail"}
+              </button>
 
-          <p>
-            Tu cuenta de Google fue validada. Ahora debes crear tu usuario dentro
-            del sistema para ingresar como perfil Usuario.
-          </p>
+              <button className="secondary-button" onClick={loginAsDefaultAdmin}>
+                Ingresar como Administrador
+              </button>
+            </div>
 
-          <form onSubmit={completeUserRegistration} className="registration-form">
-            <label>Correo Gmail</label>
-            <input value={pendingGoogleUser.email} disabled />
+            {error && <div className="alert-box">{error}</div>}
 
-            <label>Nombre completo</label>
-            <input
-              value={registrationName}
-              onChange={(event) => setRegistrationName(event.target.value)}
-              placeholder="Ingresa tu nombre"
-            />
-
-            <label>Rol asignado</label>
-            <input value="Usuario" disabled />
-
-            <button className="primary-action full-width" type="submit">
-              Crear mi usuario
-            </button>
-
-            <button
-              className="secondary-action full-width"
-              type="button"
-              onClick={cancelRegistration}
-            >
-              Cancelar
-            </button>
-          </form>
-        </div>
-      </div>
+            <div className="admin-info">
+              <strong>Administrador predeterminado</strong>
+              <span>admin@smartvision.com</span>
+            </div>
+          </div>
+        </section>
+      </main>
     );
   }
 
-  if (!role) {
+  if (pendingGoogleUser) {
     return (
-      <div className="login-shell">
-        <div className="login-background-glow glow-one"></div>
-        <div className="login-background-glow glow-two"></div>
+      <main className="login-page">
+        <section className="registration-card">
+          <span className="section-tag">Registro de usuario</span>
+          <h1>Completa tu registro</h1>
+          <p>Tu cuenta Gmail fue detectada. Confirma tu nombre para crear tu usuario normal.</p>
 
-        <section className="login-hero">
-          <div className="brand-mark">
-            <Boxes size={34} />
-          </div>
+          <div className="register-email">{pendingGoogleUser.email}</div>
 
-          <div className="hero-badge">
-            <Sparkles size={16} />
-            Cognitive Computing Project
-          </div>
+          <label className="form-label">
+            Nombre completo
+            <input
+              value={registrationName}
+              onChange={(event) => setRegistrationName(event.target.value)}
+              placeholder="Ejemplo: Marcelo Jaramillo"
+            />
+          </label>
 
-          <h1>Smart Product Vision</h1>
-
-          <p>
-            Plataforma inteligente para reconocer, clasificar y contar productos
-            usando cámara, inteligencia artificial y autenticación con Gmail.
-          </p>
-
-          <div className="hero-flow">
-            <div>
-              <Camera size={20} />
-              Cámara
-            </div>
-
-            <span></span>
-
-            <div>
-              <Cpu size={20} />
-              IA real
-            </div>
-
-            <span></span>
-
-            <div>
-              <BarChart3 size={20} />
-              Dashboard
-            </div>
+          <div className="register-actions">
+            <button className="primary-button" onClick={completeRegistration}>
+              Crear mi usuario
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => {
+                setPendingGoogleUser(null);
+                setRegistrationName("");
+              }}
+            >
+              Cancelar
+            </button>
           </div>
         </section>
-
-        <section className="login-card-pro">
-          <div className="login-card-header">
-            <div>
-              <p className="eyebrow">Bienvenido</p>
-              <h2>Acceso al sistema</h2>
-            </div>
-
-            <ShieldCheck size={30} />
-          </div>
-
-          <p className="login-description">
-            Si eres usuario nuevo, ingresa con Gmail y completa tu registro. El
-            administrador predeterminado ya existe en el sistema.
-          </p>
-
-          <button className="google-button" onClick={handleGoogleAccess}>
-            <GoogleIcon />
-            {googleLoading ? "Conectando con Gmail..." : "Ingresar / Registrarse con Gmail"}
-          </button>
-
-          <div className="divider-text">
-            <span>administrador predeterminado</span>
-          </div>
-
-          <button className="role-card" onClick={loginAsDefaultAdmin}>
-            <div className="role-icon admin-role">
-              <ShieldCheck size={24} />
-            </div>
-
-            <div>
-              <strong>Ingresar como Administrador</strong>
-              <span>Usuario administrador creado por defecto.</span>
-            </div>
-          </button>
-
-          <div className="login-footer">
-            <CheckCircle2 size={17} />
-            Login Gmail + gestión de usuarios + IA real
-          </div>
-        </section>
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar-pro">
+    <main className="app-page">
+      <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="sidebar-logo">
-            <Boxes size={26} />
-          </div>
-
+          <div className="logo-small">🍍</div>
           <div>
-            <h2>Smart Vision</h2>
-            <p>{role === "admin" ? "Administrador" : "Usuario"}</p>
+            <strong>Fruit Quality AI</strong>
+            <span>{isAdmin ? "Administrador" : "Usuario"}</span>
           </div>
         </div>
 
-        <div className="user-mini-card">
-          <strong>{currentUser?.nombre}</strong>
-          <span>{currentUser?.email}</span>
-          <small>{currentUser?.metodo}</small>
-        </div>
+        <nav className="nav-menu">
+          <button
+            className={activeView === "scanner" ? "active" : ""}
+            onClick={() => setActiveView("scanner")}
+          >
+            📷 Verificar fruta
+          </button>
 
-        <nav className="sidebar-menu">
-          {menu.map((item) => (
+          <button
+            className={activeView === "history" ? "active" : ""}
+            onClick={() => setActiveView("history")}
+          >
+            📋 Historial
+          </button>
+
+          {isAdmin && (
             <button
-              key={item.id}
-              className={screen === item.id ? "menu-item active" : "menu-item"}
-              onClick={() => setScreen(item.id)}
+              className={activeView === "users" ? "active" : ""}
+              onClick={() => setActiveView("users")}
             >
-              {item.icon}
-              <span>{item.label}</span>
+              👥 Usuarios
             </button>
-          ))}
+          )}
         </nav>
 
-        <div className="sidebar-status">
-          <div>
-            <span className={modelReady ? "status-dot" : "status-dot loading"}></span>
-            {modelStatus}
-          </div>
-
-          <small>TensorFlow.js + COCO-SSD</small>
+        <div className="user-card">
+          <span>Sesión activa</span>
+          <strong>{currentUser.nombre}</strong>
+          <small>{currentUser.email}</small>
         </div>
 
-        <button className="logout-btn" onClick={logout}>
-          <LogOut size={19} />
+        <button className="logout-button" onClick={handleLogout}>
           Cerrar sesión
         </button>
       </aside>
 
-      <main className="content-pro">
-        <header className="topbar-pro">
+      <section className="content">
+        <header className="content-header">
           <div>
-            <p className="eyebrow">Smart Product Vision</p>
-            <h1>{screenTitle[screen]}</h1>
-
-            <span>
-              Sistema de reconocimiento y conteo automático de productos mediante
-              IA.
-            </span>
+            <span className="section-tag">Filtro inteligente de frutas</span>
+            <h1>
+              {activeView === "scanner" && "Verifica si una fruta está en buen estado"}
+              {activeView === "history" && "Historial de verificaciones"}
+              {activeView === "users" && "Gestión de usuarios"}
+            </h1>
           </div>
 
-          <div className="topbar-actions">
-            <div className="search-box">
-              <Search size={18} />
-              <input placeholder="Buscar..." />
-            </div>
-
-            <div className={modelReady ? "ai-chip" : "ai-chip loading-chip"}>
-              <Sparkles size={17} />
-              {modelReady ? "IA activa" : "Cargando IA"}
-            </div>
+          <div className="model-status">
+            <span className={modelReady ? "dot ready" : "dot"} />
+            {modelStatus}
           </div>
         </header>
 
-        {screen === "dashboard" && (
-          <section className="screen-section">
-            <div className="metrics-grid">
-              <MetricCard
-                icon={<Package />}
-                label="Productos registrados"
-                value={products.length}
-                detail="Productos base para reconocimiento"
-              />
-
-              <MetricCard
-                icon={<Camera />}
-                label="Escaneos realizados"
-                value={historyLog.length}
-                detail="Imágenes procesadas por IA"
-              />
-
-              <MetricCard
-                icon={<Users />}
-                label="Usuarios"
-                value={users.length}
-                detail="Usuarios registrados en el sistema"
-              />
-
-              <MetricCard
-                icon={<CheckCircle2 />}
-                label="Motor IA"
-                value={modelReady ? "Activo" : "Cargando"}
-                detail="TensorFlow.js con COCO-SSD"
-              />
-            </div>
-
-            <div className="dashboard-grid">
-              <div className="panel-pro wide-panel">
-                <div className="panel-header">
-                  <div>
-                    <h2>Resumen del proyecto</h2>
-                    <p>Propuesta validada para Cognitive Computing</p>
-                  </div>
-
-                  <ClipboardCheck size={26} />
-                </div>
-
-                <p className="body-text">
-                  Smart Product Vision utiliza una cámara como hardware de entrada
-                  para capturar imágenes de productos. Luego, un modelo de visión
-                  computacional identifica objetos, calcula cantidades y registra
-                  los resultados. El sistema incluye perfiles de usuario y
-                  administrador, registro con Gmail y gestión de usuarios.
-                </p>
-
-                <div className="process-flow">
-                  <FlowItem icon={<Mail />} title="Gmail" />
-                  <FlowItem icon={<Camera />} title="Cámara" />
-                  <FlowItem icon={<Cpu />} title="IA real" />
-                  <FlowItem icon={<Database />} title="Registro" />
-                  <FlowItem icon={<BarChart3 />} title="Reporte" />
-                </div>
-              </div>
-
-              <div className="panel-pro">
-                <h2>Alcance del 30%</h2>
-
-                <ul className="check-list">
-                  <li>Administrador predeterminado</li>
-                  <li>Registro de usuario con Gmail</li>
-                  <li>Gestión de usuarios</li>
-                  <li>Gestión de productos</li>
-                  <li>Cámara como hardware</li>
-                  <li>Reconocimiento real con IA</li>
-                  <li>Historial de conteos</li>
-                </ul>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {screen === "scan" && (
-          <section className="screen-section">
-            <div className="scan-layout">
-              <div className="upload-panel">
-                <div className="upload-icon">
-                  <Camera size={48} />
-                </div>
-
-                <h2>Captura inteligente de productos</h2>
-
-                <p>
-                  Usa la cámara como hardware de entrada o sube una imagen. El
-                  sistema analizará la imagen con IA real.
-                </p>
-
-                <canvas ref={captureCanvasRef} style={{ display: "none" }} />
-
-                {cameraActive ? (
-                  <div className="live-camera">
-                    <video ref={videoRef} autoPlay playsInline muted />
-                  </div>
-                ) : (
-                  <div className="empty-preview">
-                    <Camera size={42} />
-                    <span>Cámara desactivada</span>
+        {activeView === "scanner" && (
+          <section className="scanner-grid">
+            <div className="camera-card">
+              <div className={`camera-stage ${cameraOn ? "on" : ""}`}>
+                {!cameraOn && (
+                  <div className="camera-empty">
+                    <div>📷</div>
+                    <h2>Cámara apagada</h2>
+                    <p>Activa la cámara y coloca una fruta frente al filtro.</p>
                   </div>
                 )}
 
-                <div className="scan-actions">
-                  <button className="secondary-action" onClick={startCamera}>
-                    Activar cámara
-                  </button>
+                <video ref={videoRef} className="video-feed" muted playsInline />
+                <canvas ref={canvasRef} className="overlay-canvas" />
+                {scanning && <span className="scan-line" />}
+              </div>
 
-                  <button className="secondary-action" onClick={captureFrame}>
-                    Capturar imagen
-                  </button>
-
-                  <button className="danger-action" onClick={stopCamera}>
-                    Apagar cámara
-                  </button>
-                </div>
-
-                <div className="divider-text">
-                  <span>o subir imagen manualmente</span>
-                </div>
-
-                <label className="upload-button">
-                  <UploadCloud size={18} />
-                  Seleccionar imagen
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handleImageUpload}
-                  />
-                </label>
-
-                {imagePreview && (
-                  <div className="preview-card ai-preview">
-                    <img
-                      ref={imageRef}
-                      src={imagePreview}
-                      alt="Vista previa"
-                      onLoad={() => {
-                        if (overlayRef.current && imageRef.current) {
-                          overlayRef.current.width = imageRef.current.clientWidth;
-                          overlayRef.current.height = imageRef.current.clientHeight;
-                        }
-                      }}
-                    />
-
-                    <canvas ref={overlayRef} className="detection-canvas" />
-                  </div>
-                )}
-
-                <button
-                  className="primary-action"
-                  onClick={runRealAIRecognition}
-                  disabled={!modelReady}
-                >
-                  <Sparkles size={18} />
-                  {modelReady ? "Escanear con IA real" : "Cargando modelo IA..."}
+              <div className="control-grid">
+                <button className="blue-button" onClick={startCamera} disabled={cameraOn}>
+                  Activar cámara
+                </button>
+                <button className="green-button" onClick={startScanning} disabled={scanning}>
+                  Iniciar filtro
+                </button>
+                <button className="yellow-button" onClick={stopScanning} disabled={!scanning}>
+                  Detener filtro
+                </button>
+                <button className="red-button" onClick={stopCamera} disabled={!cameraOn}>
+                  Apagar cámara
                 </button>
               </div>
 
-              <div className="panel-pro results-panel">
-                <div className="panel-header">
-                  <div>
-                    <h2>Resultados del análisis</h2>
-                    <p>Productos detectados por visión computacional</p>
-                  </div>
-
-                  <Cpu size={26} />
-                </div>
-
-                {scanLoading && (
-                  <div className="scan-loader">
-                    <div className="loader-circle">
-                      <Sparkles size={34} />
-                    </div>
-
-                    <h3>{scanStage}</h3>
-
-                    <div className="loader-bar">
-                      <span></span>
-                    </div>
-
-                    <p>
-                      La IA está analizando la imagen, identificando objetos y
-                      estimando cantidades.
-                    </p>
-                  </div>
-                )}
-
-                {!scanLoading && !scanDone && (
-                  <div className="empty-state">
-                    <Search size={42} />
-                    <h3>Aún no se ha procesado la imagen</h3>
-                    <p>Activa la cámara o sube una imagen para iniciar.</p>
-                  </div>
-                )}
-
-                {!scanLoading && scanDone && (
-                  <>
-                    <div className="recognition-summary">
-                      <div>
-                        <span>Estado</span>
-                        <strong>Reconocimiento ejecutado</strong>
-                      </div>
-
-                      <div>
-                        <span>Total detectado</span>
-                        <strong>{totalDetected} objetos</strong>
-                      </div>
-
-                      <div>
-                        <span>Motor IA</span>
-                        <strong>COCO-SSD</strong>
-                      </div>
-                    </div>
-
-                    {detectedProducts.length === 0 && (
-                      <div className="no-detections">
-                        <AlertTriangle size={24} />
-                        <strong>No se detectaron productos confiables.</strong>
-                        <p>
-                          Prueba con una imagen más clara, buena iluminación y
-                          objetos separados.
-                        </p>
-                      </div>
-                    )}
-
-                    {detectedProducts.length > 0 && (
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Producto</th>
-                            <th>Categoría</th>
-                            <th>Cantidad</th>
-                            <th>Confianza</th>
-                          </tr>
-                        </thead>
-
-                        <tbody>
-                          {detectedProducts.map((item, index) => (
-                            <tr key={index}>
-                              <td>{item.producto}</td>
-                              <td>{item.categoria}</td>
-                              <td>{item.cantidad}</td>
-                              <td>
-                                <span className="tag success">
-                                  {item.confianza}
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </>
-                )}
-              </div>
+              {error && <div className="alert-box">{error}</div>}
             </div>
+
+            <aside className={`result-panel ${result.status}`}>
+              <div className="result-top">
+                <span className="result-emoji">{result.emoji}</span>
+                <div>
+                  <p>Resultado del filtro</p>
+                  <h2>{result.decision}</h2>
+                </div>
+              </div>
+
+              <div className="decision-card">
+                <span>{result.title}</span>
+                <strong>{result.fruit}</strong>
+                <p>{result.message}</p>
+              </div>
+
+              <div className="quality-card">
+                <div className="quality-title">
+                  <span>Calidad estimada</span>
+                  <strong>{result.quality}%</strong>
+                </div>
+                <div className="quality-bar">
+                  <div style={{ width: `${clamp(result.quality, 0, 100)}%` }} />
+                </div>
+              </div>
+
+              <div className="metric-grid">
+                <div>
+                  <span>Confianza IA</span>
+                  <strong>{result.confidence}%</strong>
+                </div>
+                <div>
+                  <span>Daño visual</span>
+                  <strong>{result.damage}%</strong>
+                </div>
+                <div>
+                  <span>Manchas</span>
+                  <strong>{result.spots}%</strong>
+                </div>
+                <div>
+                  <span>Color sano</span>
+                  <strong>{result.colorHealth}%</strong>
+                </div>
+              </div>
+
+              <div className="support-card">
+                <strong>Frutas soportadas</strong>
+                <p>Manzana, plátano y naranja. Si colocas otro objeto, el filtro lo ignora.</p>
+              </div>
+            </aside>
           </section>
         )}
 
-        {screen === "products" && role === "admin" && (
-          <section className="screen-section">
-            <div className="panel-pro">
-              <div className="panel-header">
-                <div>
-                  <h2>Registrar producto</h2>
-                  <p>Base de productos que serán reconocidos por la IA</p>
-                </div>
-
-                <Package size={26} />
+        {activeView === "history" && (
+          <section className="history-layout">
+            <div className="stats-grid">
+              <div>
+                <span>Total</span>
+                <strong>{dashboardStats.total}</strong>
               </div>
-
-              <form className="form-grid" onSubmit={handleAddProduct}>
-                <FormInput
-                  label="Código"
-                  placeholder="P004"
-                  value={newProduct.codigo}
-                  onChange={(value) =>
-                    setNewProduct({ ...newProduct, codigo: value })
-                  }
-                />
-
-                <FormInput
-                  label="Producto"
-                  placeholder="Mouse"
-                  value={newProduct.nombre}
-                  onChange={(value) =>
-                    setNewProduct({ ...newProduct, nombre: value })
-                  }
-                />
-
-                <FormInput
-                  label="Categoría"
-                  placeholder="Tecnología"
-                  value={newProduct.categoria}
-                  onChange={(value) =>
-                    setNewProduct({ ...newProduct, categoria: value })
-                  }
-                />
-
-                <div className="form-field">
-                  <label>Estado</label>
-                  <select
-                    value={newProduct.estado}
-                    onChange={(event) =>
-                      setNewProduct({
-                        ...newProduct,
-                        estado: event.target.value
-                      })
-                    }
-                  >
-                    <option>Activo</option>
-                    <option>Inactivo</option>
-                  </select>
-                </div>
-
-                <button className="form-button" type="submit">
-                  <PlusCircle size={18} />
-                  Agregar
-                </button>
-              </form>
+              <div>
+                <span>Aprobadas</span>
+                <strong>{dashboardStats.approved}</strong>
+              </div>
+              <div>
+                <span>Rechazadas</span>
+                <strong>{dashboardStats.rejected}</strong>
+              </div>
+              <div>
+                <span>Revisar</span>
+                <strong>{dashboardStats.review}</strong>
+              </div>
             </div>
 
-            <DataPanel
-              title="Productos registrados"
-              subtitle="Listado de productos configurados"
-              columns={["Código", "Producto", "Categoría", "Estado"]}
-              rows={products.map((item) => [
-                item.codigo,
-                item.nombre,
-                item.categoria,
-                <span
-                  className={
-                    item.estado === "Activo" ? "tag success" : "tag warning"
-                  }
-                >
-                  {item.estado}
-                </span>
-              ])}
-            />
-          </section>
-        )}
-
-        {screen === "users" && role === "admin" && (
-          <section className="screen-section">
-            <div className="panel-pro">
-              <div className="panel-header">
-                <div>
-                  <h2>Crear usuario</h2>
-                  <p>
-                    El administrador puede registrar usuarios autorizados para el
-                    sistema.
-                  </p>
-                </div>
-
-                <UserPlus size={26} />
-              </div>
-
-              <form className="admin-user-form" onSubmit={handleCreateUser}>
-                <FormInput
-                  label="Nombre"
-                  placeholder="Nombre del usuario"
-                  value={newUser.nombre}
-                  onChange={(value) => setNewUser({ ...newUser, nombre: value })}
-                />
-
-                <FormInput
-                  label="Correo"
-                  placeholder="correo@gmail.com"
-                  value={newUser.email}
-                  onChange={(value) => setNewUser({ ...newUser, email: value })}
-                />
-
-                <div className="form-field">
-                  <label>Rol</label>
-                  <select
-                    value={newUser.rol}
-                    onChange={(event) =>
-                      setNewUser({ ...newUser, rol: event.target.value })
-                    }
-                  >
-                    <option>Usuario</option>
-                    <option>Administrador</option>
-                  </select>
-                </div>
-
-                <div className="form-field">
-                  <label>Estado</label>
-                  <select
-                    value={newUser.estado}
-                    onChange={(event) =>
-                      setNewUser({ ...newUser, estado: event.target.value })
-                    }
-                  >
-                    <option>Activo</option>
-                    <option>Inactivo</option>
-                  </select>
-                </div>
-
-                <button className="form-button" type="submit">
-                  <PlusCircle size={18} />
-                  Crear usuario
-                </button>
-              </form>
-            </div>
-
-            <div className="panel-pro">
-              <div className="panel-header">
-                <div>
-                  <h2>Usuarios del sistema</h2>
-                  <p>Usuarios creados, registrados con Gmail y predeterminados.</p>
-                </div>
-
-                <Database size={26} />
-              </div>
-
-              <div className="table-wrapper">
-                <table>
-                  <thead>
+            <div className="table-card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Usuario</th>
+                    <th>Fruta</th>
+                    <th>Resultado</th>
+                    <th>Calidad</th>
+                    <th>Confianza</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.length === 0 && (
                     <tr>
-                      <th>Nombre</th>
-                      <th>Correo</th>
-                      <th>Rol</th>
-                      <th>Estado</th>
-                      <th>Método</th>
-                      <th>Acción</th>
+                      <td colSpan="6">Aún no hay verificaciones registradas.</td>
                     </tr>
-                  </thead>
+                  )}
 
-                  <tbody>
-                    {users.map((item) => (
-                      <tr key={item.email}>
-                        <td>{item.nombre}</td>
-                        <td>{item.email}</td>
-                        <td>{item.rol}</td>
-                        <td>
-                          <span
-                            className={
-                              item.estado === "Activo"
-                                ? "tag success"
-                                : "tag warning"
-                            }
-                          >
-                            {item.estado}
-                          </span>
-                        </td>
-                        <td>{item.metodo}</td>
-                        <td>
-                          <button
-                            className="danger-small"
-                            onClick={() => handleDeleteUser(item.email)}
-                          >
-                            <Trash2 size={15} />
-                            Eliminar
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                  {history.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.fecha}</td>
+                      <td>{item.usuario}</td>
+                      <td>{item.fruta}</td>
+                      <td>
+                        <span className={`badge ${item.decision.toLowerCase()}`}>
+                          {item.decision}
+                        </span>
+                      </td>
+                      <td>{item.calidad}%</td>
+                      <td>{item.confianza}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </section>
         )}
 
-        {screen === "history" && (
-          <section className="screen-section">
-            <DataPanel
-              title="Historial de conteos"
-              subtitle="Registro de escaneos realizados por usuarios"
-              columns={["Fecha", "Usuario", "Resultado", "Estado"]}
-              rows={historyLog.map((item) => [
-                item.fecha,
-                item.usuario,
-                item.resultado,
-                <span
-                  className={
-                    item.estado === "Validado" ? "tag success" : "tag warning"
-                  }
+        {activeView === "users" && isAdmin && (
+          <section className="users-layout">
+            <form className="form-card" onSubmit={addUser}>
+              <h2>Crear usuario</h2>
+
+              <label className="form-label">
+                Nombre
+                <input
+                  value={newUser.nombre}
+                  onChange={(event) => setNewUser({ ...newUser, nombre: event.target.value })}
+                  placeholder="Nombre del usuario"
+                />
+              </label>
+
+              <label className="form-label">
+                Correo
+                <input
+                  value={newUser.email}
+                  onChange={(event) => setNewUser({ ...newUser, email: event.target.value })}
+                  placeholder="correo@ejemplo.com"
+                />
+              </label>
+
+              <label className="form-label">
+                Rol
+                <select
+                  value={newUser.rol}
+                  onChange={(event) => setNewUser({ ...newUser, rol: event.target.value })}
                 >
-                  {item.estado}
-                </span>
-              ])}
-            />
+                  <option>Usuario</option>
+                  <option>Administrador</option>
+                </select>
+              </label>
+
+              <button className="primary-button" type="submit">
+                Crear usuario
+              </button>
+            </form>
+
+            <div className="table-card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Nombre</th>
+                    <th>Correo</th>
+                    <th>Rol</th>
+                    <th>Estado</th>
+                    <th>Acción</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map((user) => (
+                    <tr key={user.email}>
+                      <td>{user.nombre}</td>
+                      <td>{user.email}</td>
+                      <td>{user.rol}</td>
+                      <td>
+                        <select
+                          value={user.estado}
+                          disabled={user.protegido}
+                          onChange={(event) => updateUserStatus(user.email, event.target.value)}
+                        >
+                          <option>Activo</option>
+                          <option>Inactivo</option>
+                        </select>
+                      </td>
+                      <td>
+                        <button
+                          className="mini-danger"
+                          disabled={user.protegido}
+                          onClick={() => deleteUser(user.email)}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
         )}
-      </main>
-    </div>
+      </section>
+    </main>
   );
 }
-
-function MetricCard({ icon, label, value, detail }) {
-  return (
-    <div className="metric-card-pro">
-      <div className="metric-icon">{icon}</div>
-      <p>{label}</p>
-      <strong>{value}</strong>
-      <span>{detail}</span>
-    </div>
-  );
-}
-
-function FlowItem({ icon, title }) {
-  return (
-    <div className="flow-item">
-      {icon}
-      <span>{title}</span>
-    </div>
-  );
-}
-
-function FormInput({ label, placeholder, value, onChange }) {
-  return (
-    <div className="form-field">
-      <label>{label}</label>
-
-      <input
-        placeholder={placeholder}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </div>
-  );
-}
-
-function DataPanel({ title, subtitle, columns, rows }) {
-  return (
-    <div className="panel-pro">
-      <div className="panel-header">
-        <div>
-          <h2>{title}</h2>
-          <p>{subtitle}</p>
-        </div>
-
-        <Database size={26} />
-      </div>
-
-      <div className="table-wrapper">
-        <table>
-          <thead>
-            <tr>
-              {columns.map((column) => (
-                <th key={column}>{column}</th>
-              ))}
-            </tr>
-          </thead>
-
-          <tbody>
-            {rows.map((row, rowIndex) => (
-              <tr key={rowIndex}>
-                {row.map((cell, cellIndex) => (
-                  <td key={cellIndex}>{cell}</td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function GoogleIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 48 48">
-      <path
-        fill="#FFC107"
-        d="M43.611 20.083H42V20H24v8h11.303C33.654 32.657 29.223 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"
-      />
-      <path
-        fill="#FF3D00"
-        d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"
-      />
-      <path
-        fill="#4CAF50"
-        d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.211 35.091 26.715 36 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"
-      />
-      <path
-        fill="#1976D2"
-        d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"
-      />
-    </svg>
-  );
-}
-
-export default App;

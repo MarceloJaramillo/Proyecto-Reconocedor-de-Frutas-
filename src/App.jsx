@@ -8,6 +8,13 @@ import {
   signOut,
   hasFirebaseConfig
 } from "./firebase";
+import {
+  verificarESP32,
+  encenderBanda,
+  apagarBanda,
+  desviarFruta,
+  desviarInmediato
+} from "./esp32";
 import "./App.css";
 
 const DEFAULT_ADMIN = {
@@ -269,6 +276,7 @@ export default function App() {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [modelReady, setModelReady] = useState(false);
   const [modelStatus, setModelStatus] = useState("Modelo pendiente");
+  const [esp32Conectado, setEsp32Conectado] = useState(null);
   const [cameraOn, setCameraOn] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState("");
@@ -313,6 +321,15 @@ export default function App() {
       stopCamera();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const verificar = () => {
+      verificarESP32().then((disponible) => setEsp32Conectado(disponible));
+    };
+    verificar();
+    const intervalo = setInterval(verificar, 10000);
+    return () => clearInterval(intervalo);
   }, []);
 
   const loadModel = async () => {
@@ -660,6 +677,11 @@ export default function App() {
     lastSavedRef.current = signature;
     lastSavedAtRef.current = now.getTime();
 
+    // Fruta rechazada: activar servo con delay para que llegue al punto de desvío
+    if (qualityResult.decision === "RECHAZADO") {
+      desviarFruta();
+    }
+
     const id =
       globalThis.crypto && globalThis.crypto.randomUUID
         ? globalThis.crypto.randomUUID()
@@ -919,9 +941,27 @@ export default function App() {
             </h1>
           </div>
 
-          <div className="model-status">
-            <span className={modelReady ? "dot ready" : "dot"} />
-            {modelStatus}
+          <div className="header-indicators">
+            <div className="model-status">
+              <span className={modelReady ? "dot ready" : "dot"} />
+              {modelStatus}
+            </div>
+            <div className="model-status">
+              <span
+                className={
+                  esp32Conectado === true
+                    ? "dot ready"
+                    : esp32Conectado === false
+                      ? "dot error"
+                      : "dot"
+                }
+              />
+              {esp32Conectado === null
+                ? "ESP32 verificando..."
+                : esp32Conectado
+                  ? "ESP32 conectado"
+                  : "ESP32 sin conexión"}
+            </div>
           </div>
         </header>
 
@@ -955,6 +995,21 @@ export default function App() {
                 <button className="red-button" onClick={stopCamera} disabled={!cameraOn}>
                   Apagar cámara
                 </button>
+              </div>
+
+              <div className="esp32-controls">
+                <span className="esp32-label">Control ESP32</span>
+                <div className="esp32-buttons">
+                  <button className="esp32-button banda-on" onClick={encenderBanda}>
+                    ▶️ Encender banda
+                  </button>
+                  <button className="esp32-button banda-off" onClick={apagarBanda}>
+                    ⏹️ Apagar banda
+                  </button>
+                  <button className="esp32-button servo-test" onClick={desviarInmediato}>
+                    🧪 Probar servo
+                  </button>
+                </div>
               </div>
 
               {error && <div className="alert-box">{error}</div>}

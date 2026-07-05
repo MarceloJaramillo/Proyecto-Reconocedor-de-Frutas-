@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import "@tensorflow/tfjs";
-import * as cocoSsd from "@tensorflow-models/coco-ssd";
 import {
   auth,
   googleProvider,
@@ -31,31 +29,43 @@ const STORAGE_KEYS = {
   history: "fq_history"
 };
 
-const FRUITS = {
-  apple: {
-    name: "Manzana",
-    emoji: "🍎",
-    colors: "rojo, verde o amarillo"
+const PRODUCTS = {
+  avocado: {
+    name: "Palta",
+    label: "Palta (aguacate)",
+    emoji: "🥑",
+    colors: "verde oscuro, verde o marrón natural"
   },
-  banana: {
-    name: "Plátano",
-    emoji: "🍌",
-    colors: "amarillo o verde"
+  mango: {
+    name: "Mango",
+    label: "Mango",
+    emoji: "🥭",
+    colors: "amarillo, naranja, rojizo o verde"
   },
-  orange: {
-    name: "Naranja",
-    emoji: "🍊",
-    colors: "naranja"
+  ginger: {
+    name: "Jengibre",
+    label: "Jengibre",
+    emoji: "🫚",
+    colors: "beige, marrón claro o crema"
+  },
+  turmeric: {
+    name: "Cúrcuma",
+    label: "Cúrcuma",
+    emoji: "🟠",
+    colors: "naranja intenso, amarillo oscuro o marrón anaranjado"
   }
 };
+
+const ACCEPTED_PRODUCTS_TEXT = "Palta, mango, jengibre y cúrcuma";
+const REJECT_DECISIONS = ["RECHAZADO", "NO RECONOCIDO"];
 
 const EMPTY_RESULT = {
   status: "waiting",
   decision: "ESPERANDO",
   title: "Sin análisis",
-  fruit: "Coloca una fruta",
-  emoji: "🍏",
-  message: "Activa la cámara e inicia el filtro para verificar la fruta.",
+  fruit: "Coloca un producto",
+  emoji: "🥑",
+  message: "Activa la cámara e inicia el filtro para verificar palta, mango, jengibre o cúrcuma.",
   confidence: 0,
   quality: 0,
   damage: 0,
@@ -105,135 +115,180 @@ function drawRoundRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
-function isHealthyFruitColor(className, r, g, b) {
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const saturation = max - min;
-
-  if (className === "banana") {
-    const yellow = r > 115 && g > 95 && b < 145 && Math.abs(r - g) < 95;
-    const green = g > 85 && r > 55 && b < 135;
-    return yellow || green;
-  }
-
-  if (className === "apple") {
-    const red = r > 105 && r > g * 1.08 && r > b * 1.12;
-    const green = g > 85 && g > b * 1.08 && g > r * 0.75;
-    const yellow = r > 115 && g > 90 && b < 140;
-    return saturation > 24 && (red || green || yellow);
-  }
-
-  if (className === "orange") {
-    return r > 125 && g > 55 && g < 180 && b < 145 && r > b * 1.18;
-  }
-
-  return false;
-}
-
-function isDamagedPixel(r, g, b) {
+function getPixelInfo(r, g, b) {
   const avg = (r + g + b) / 3;
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
-  const saturation = max - min;
+  const sat = max - min;
 
-  const veryDark = avg < 42;
-  const darkBrown = r > 35 && g > 20 && b < 95 && avg < 130 && r >= g * 0.85 && g >= b * 1.02;
-  const blackSpot = avg < 70 && saturation < 48;
-  const grayRot = saturation < 18 && avg > 45 && avg < 155;
+  const green = g > 62 && g >= r * 0.82 && g > b * 1.08;
+  const darkGreen = g > 42 && g >= r * 0.78 && g > b * 1.12 && avg < 145;
+  const yellow = r > 118 && g > 94 && b < 135 && Math.abs(r - g) < 115;
+  const orange = r > 125 && g > 55 && g < 185 && b < 130 && r > b * 1.22;
+  const red = r > 115 && r > g * 1.12 && r > b * 1.18;
+  const beige =
+    r > 74 &&
+    g > 48 &&
+    b > 28 &&
+    avg > 64 &&
+    avg < 215 &&
+    sat < 92 &&
+    r >= g * 0.92 &&
+    g >= b * 0.82;
+  const lightBrown =
+    r > 65 &&
+    g > 38 &&
+    b > 18 &&
+    avg > 55 &&
+    avg < 175 &&
+    sat < 105 &&
+    r >= g * 0.9 &&
+    g >= b * 0.75;
+  const turmeric = r > 100 && g > 42 && b < 112 && r > g * 1.03 && g >= b * 0.72;
 
-  return veryDark || darkBrown || blackSpot || grayRot;
+  const veryDark = avg < 38;
+  const blackSpot = avg < 62 && sat < 50;
+  const grayRot = sat < 18 && avg > 42 && avg < 155;
+  const rottenBrown = r > 35 && g > 18 && b < 92 && avg < 112 && r >= g * 0.82 && g >= b * 1.0;
+
+  const saturatedObject = sat > 30 && avg > 38 && avg < 235;
+  const knownProductColor = green || darkGreen || yellow || orange || red || beige || lightBrown || turmeric;
+  const foreground = knownProductColor || saturatedObject || veryDark || blackSpot || rottenBrown;
+
+  return {
+    avg,
+    sat,
+    green,
+    darkGreen,
+    yellow,
+    orange,
+    red,
+    beige,
+    lightBrown,
+    turmeric,
+    veryDark,
+    blackSpot,
+    grayRot,
+    rottenBrown,
+    foreground
+  };
 }
 
-function analyzeFruitQuality(video, bbox, className) {
-  const [rawX, rawY, rawW, rawH] = bbox;
-  const videoWidth = video.videoWidth || 1;
-  const videoHeight = video.videoHeight || 1;
+function buildQualityByProduct(productKey, stats) {
+  const total = Math.max(stats.foreground, 1);
 
-  const x = clamp(Math.round(rawX), 0, videoWidth - 1);
-  const y = clamp(Math.round(rawY), 0, videoHeight - 1);
-  const w = clamp(Math.round(rawW), 1, videoWidth - x);
-  const h = clamp(Math.round(rawH), 1, videoHeight - y);
+  const ratios = {
+    green: stats.green / total,
+    darkGreen: stats.darkGreen / total,
+    yellow: stats.yellow / total,
+    orange: stats.orange / total,
+    red: stats.red / total,
+    beige: stats.beige / total,
+    lightBrown: stats.lightBrown / total,
+    turmeric: stats.turmeric / total,
+    veryDark: stats.veryDark / total,
+    blackSpot: stats.blackSpot / total,
+    grayRot: stats.grayRot / total,
+    rottenBrown: stats.rottenBrown / total
+  };
 
-  const sampleSize = 150;
-  const tempCanvas = document.createElement("canvas");
-  tempCanvas.width = sampleSize;
-  tempCanvas.height = sampleSize;
+  let colorHealth = 0;
+  let damageRatio = 0;
 
-  const ctx = tempCanvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) {
-    return {
-      status: "review",
-      decision: "REVISAR",
-      title: "REVISAR",
-      message: "No se pudo analizar la fruta. Intenta nuevamente.",
-      quality: 50,
-      damage: 0,
-      spots: 0,
-      colorHealth: 0
-    };
+  // MODO ESTRICTO: antes estaba muy permisivo y por eso una fruta dañada podía salir APROBADA.
+  // Ahora cualquier porcentaje relevante de manchas negras/marrones baja fuerte la calidad.
+  const spotRatio = clamp(ratios.veryDark + ratios.blackSpot, 0, 1);
+  const rotRatio = clamp(ratios.rottenBrown + ratios.grayRot * 0.65, 0, 1);
+
+  if (productKey === "avocado") {
+    // Palta: se acepta verde/verde oscuro, pero se castigan manchas negras y zonas podridas.
+    colorHealth = clamp(ratios.green + ratios.darkGreen * 0.85 + ratios.lightBrown * 0.12, 0, 1);
+    damageRatio = clamp(
+      ratios.veryDark * 1.45 +
+        ratios.blackSpot * 1.55 +
+        ratios.rottenBrown * 1.15 +
+        ratios.grayRot * 0.5,
+      0,
+      1
+    );
   }
 
-  ctx.drawImage(video, x, y, w, h, 0, 0, sampleSize, sampleSize);
-
-  const { data } = ctx.getImageData(0, 0, sampleSize, sampleSize);
-
-  let usefulPixels = 0;
-  let healthyPixels = 0;
-  let damagedPixels = 0;
-  let darkSpots = 0;
-
-  for (let py = 0; py < sampleSize; py += 2) {
-    for (let px = 0; px < sampleSize; px += 2) {
-      const dx = (px - sampleSize / 2) / (sampleSize / 2);
-      const dy = (py - sampleSize / 2) / (sampleSize / 2);
-
-      if (dx * dx + dy * dy > 0.92) continue;
-
-      const index = (py * sampleSize + px) * 4;
-      const r = data[index];
-      const g = data[index + 1];
-      const b = data[index + 2];
-
-      const avg = (r + g + b) / 3;
-      const saturation = Math.max(r, g, b) - Math.min(r, g, b);
-      const healthy = isHealthyFruitColor(className, r, g, b);
-      const damaged = isDamagedPixel(r, g, b);
-
-      const looksLikeFruitArea = healthy || damaged || saturation > 30 || avg > 60;
-      if (!looksLikeFruitArea) continue;
-
-      usefulPixels += 1;
-
-      if (healthy) healthyPixels += 1;
-      if (damaged) damagedPixels += 1;
-      if (avg < 58) darkSpots += 1;
-    }
+  if (productKey === "mango") {
+    // Mango: se acepta amarillo/naranja/rojizo/verde, pero las manchas oscuras son rechazo rápido.
+    colorHealth = clamp(ratios.yellow + ratios.orange + ratios.red * 0.75 + ratios.green * 0.35, 0, 1);
+    damageRatio = clamp(
+      ratios.veryDark * 1.55 +
+        ratios.blackSpot * 1.6 +
+        ratios.rottenBrown * 1.3 +
+        ratios.grayRot * 0.55,
+      0,
+      1
+    );
   }
 
-  const safeTotal = Math.max(usefulPixels, 1);
-  const damageRatio = damagedPixels / safeTotal;
-  const darkRatio = darkSpots / safeTotal;
-  const colorRatio = healthyPixels / safeTotal;
+  if (productKey === "ginger") {
+    // Jengibre: su color natural es beige/marrón claro, por eso se castiga más lo negro/gris.
+    colorHealth = clamp(ratios.beige + ratios.lightBrown * 0.8, 0, 1);
+    damageRatio = clamp(
+      ratios.veryDark * 1.45 +
+        ratios.blackSpot * 1.35 +
+        ratios.grayRot * 0.75 +
+        ratios.rottenBrown * 0.35,
+      0,
+      1
+    );
+  }
+
+  if (productKey === "turmeric") {
+    // Cúrcuma: se acepta naranja/amarillo intenso, se rechaza si aparecen zonas negras o grises.
+    colorHealth = clamp(ratios.turmeric + ratios.orange * 0.8 + ratios.yellow * 0.55 + ratios.lightBrown * 0.15, 0, 1);
+    damageRatio = clamp(
+      ratios.veryDark * 1.45 +
+        ratios.blackSpot * 1.35 +
+        ratios.grayRot * 0.7 +
+        ratios.rottenBrown * 0.35,
+      0,
+      1
+    );
+  }
 
   const quality = Math.round(
-    clamp(92 + colorRatio * 18 - damageRatio * 260 - darkRatio * 120, 0, 100)
+    clamp(100 + colorHealth * 8 - damageRatio * 360 - spotRatio * 120 - rotRatio * 80, 0, 100)
   );
 
   let status = "review";
   let decision = "REVISAR";
   let title = "REVISAR";
-  let message = "La fruta tiene señales dudosas. Se recomienda revisión manual.";
+  let message = "El producto presenta señales dudosas. Se recomienda revisión manual.";
 
-  if (damageRatio >= 0.18 || darkRatio >= 0.16 || quality < 48) {
+  // Rechazo más sensible para la demo: si hay manchas visibles, no debe salir como buen estado.
+  const mustReject =
+    damageRatio >= 0.085 ||
+    spotRatio >= 0.045 ||
+    ratios.blackSpot >= 0.028 ||
+    ratios.veryDark >= 0.04 ||
+    rotRatio >= 0.07 ||
+    quality < 62;
+
+  const clearlyGood =
+    damageRatio <= 0.035 &&
+    spotRatio <= 0.022 &&
+    ratios.blackSpot <= 0.014 &&
+    ratios.veryDark <= 0.025 &&
+    rotRatio <= 0.035 &&
+    quality >= 76 &&
+    colorHealth >= 0.12;
+
+  if (mustReject) {
     status = "bad";
     decision = "RECHAZADO";
     title = "MAL ESTADO";
-    message = "Se detectaron manchas oscuras o zonas deterioradas. La fruta no pasa el filtro.";
-  } else if (damageRatio <= 0.08 && darkRatio <= 0.08 && quality >= 72) {
+    message = "Se detectaron manchas oscuras, zonas dañadas o deterioro visual. El producto será enviado al descarte.";
+  } else if (clearlyGood) {
     status = "good";
     decision = "APROBADO";
     title = "BUEN ESTADO";
-    message = "La fruta presenta buen color y pocas señales de deterioro. Pasa el filtro.";
+    message = "El producto presenta color aceptable y no muestra deterioro relevante. Pasa el filtro.";
   }
 
   return {
@@ -243,15 +298,175 @@ function analyzeFruitQuality(video, bbox, className) {
     message,
     quality,
     damage: Math.round(damageRatio * 100),
-    spots: Math.round(darkRatio * 100),
-    colorHealth: Math.round(colorRatio * 100)
+    spots: Math.round(spotRatio * 100),
+    colorHealth: Math.round(colorHealth * 100)
   };
 }
 
-function pickBestFruit(predictions) {
-  return predictions
-    .filter((item) => FRUITS[item.class] && item.score >= 0.45)
-    .sort((a, b) => b.score * b.bbox[2] * b.bbox[3] - a.score * a.bbox[2] * a.bbox[3])[0];
+function analyzeAgroProduct(video) {
+  const videoWidth = video.videoWidth || 1280;
+  const videoHeight = video.videoHeight || 720;
+
+  const sampleWidth = 260;
+  const sampleHeight = 190;
+  const cropScale = 0.78;
+  const cropW = videoWidth * cropScale;
+  const cropH = videoHeight * cropScale;
+  const cropX = (videoWidth - cropW) / 2;
+  const cropY = (videoHeight - cropH) / 2;
+
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = sampleWidth;
+  tempCanvas.height = sampleHeight;
+
+  const ctx = tempCanvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+
+  ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, sampleWidth, sampleHeight);
+  const { data } = ctx.getImageData(0, 0, sampleWidth, sampleHeight);
+
+  const stats = {
+    foreground: 0,
+    green: 0,
+    darkGreen: 0,
+    yellow: 0,
+    orange: 0,
+    red: 0,
+    beige: 0,
+    lightBrown: 0,
+    turmeric: 0,
+    veryDark: 0,
+    blackSpot: 0,
+    grayRot: 0,
+    rottenBrown: 0,
+    minX: sampleWidth,
+    minY: sampleHeight,
+    maxX: 0,
+    maxY: 0
+  };
+
+  for (let y = 0; y < sampleHeight; y += 2) {
+    for (let x = 0; x < sampleWidth; x += 2) {
+      const nx = (x - sampleWidth / 2) / (sampleWidth / 2);
+      const ny = (y - sampleHeight / 2) / (sampleHeight / 2);
+      const centerWeight = nx * nx + ny * ny;
+
+      if (centerWeight > 1.05) continue;
+
+      const index = (y * sampleWidth + x) * 4;
+      const info = getPixelInfo(data[index], data[index + 1], data[index + 2]);
+
+      if (!info.foreground) continue;
+
+      stats.foreground += 1;
+      if (info.green) stats.green += 1;
+      if (info.darkGreen) stats.darkGreen += 1;
+      if (info.yellow) stats.yellow += 1;
+      if (info.orange) stats.orange += 1;
+      if (info.red) stats.red += 1;
+      if (info.beige) stats.beige += 1;
+      if (info.lightBrown) stats.lightBrown += 1;
+      if (info.turmeric) stats.turmeric += 1;
+      if (info.veryDark) stats.veryDark += 1;
+      if (info.blackSpot) stats.blackSpot += 1;
+      if (info.grayRot) stats.grayRot += 1;
+      if (info.rottenBrown) stats.rottenBrown += 1;
+
+      stats.minX = Math.min(stats.minX, x);
+      stats.minY = Math.min(stats.minY, y);
+      stats.maxX = Math.max(stats.maxX, x);
+      stats.maxY = Math.max(stats.maxY, y);
+    }
+  }
+
+  const minForeground = 260;
+  if (stats.foreground < minForeground) {
+    return {
+      found: false,
+      status: "searching",
+      decision: "SIN PRODUCTO",
+      title: "Buscando producto",
+      product: "Coloca un producto",
+      emoji: "🥑",
+      message: `El sistema acepta: ${ACCEPTED_PRODUCTS_TEXT}.`,
+      confidence: 0,
+      quality: 0,
+      damage: 0,
+      spots: 0,
+      colorHealth: 0,
+      bbox: null
+    };
+  }
+
+  const total = Math.max(stats.foreground, 1);
+  const ratios = {
+    green: stats.green / total,
+    darkGreen: stats.darkGreen / total,
+    yellow: stats.yellow / total,
+    orange: stats.orange / total,
+    red: stats.red / total,
+    beige: stats.beige / total,
+    lightBrown: stats.lightBrown / total,
+    turmeric: stats.turmeric / total
+  };
+
+  const widthRatio = Math.max(stats.maxX - stats.minX, 1) / sampleWidth;
+  const heightRatio = Math.max(stats.maxY - stats.minY, 1) / sampleHeight;
+  const objectPresence = clamp(stats.foreground / (sampleWidth * sampleHeight * 0.25), 0, 1);
+  const ovalBonus = widthRatio > 0.22 && heightRatio > 0.22 ? 0.08 : 0;
+
+  const scores = {
+    avocado: clamp((ratios.green * 0.65 + ratios.darkGreen * 0.55 + ratios.lightBrown * 0.12 + ovalBonus) * 100, 0, 100),
+    mango: clamp((ratios.yellow * 0.5 + ratios.orange * 0.58 + ratios.red * 0.28 + ratios.green * 0.16 + ovalBonus) * 100, 0, 100),
+    ginger: clamp((ratios.beige * 0.65 + ratios.lightBrown * 0.58 - ratios.orange * 0.18 - ratios.green * 0.12) * 100, 0, 100),
+    turmeric: clamp((ratios.turmeric * 0.65 + ratios.orange * 0.5 + ratios.yellow * 0.18 - ratios.green * 0.18) * 100, 0, 100)
+  };
+
+  const productKey = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
+  const rawConfidence = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][1];
+  const confidence = Math.round(clamp(rawConfidence * 0.9 + objectPresence * 18, 0, 99));
+
+  const x = cropX + (stats.minX / sampleWidth) * cropW;
+  const y = cropY + (stats.minY / sampleHeight) * cropH;
+  const w = ((stats.maxX - stats.minX) / sampleWidth) * cropW;
+  const h = ((stats.maxY - stats.minY) / sampleHeight) * cropH;
+  const bbox = [clamp(x, 0, videoWidth - 1), clamp(y, 0, videoHeight - 1), clamp(w, 40, videoWidth), clamp(h, 40, videoHeight)];
+
+  if (confidence < 32) {
+    return {
+      found: true,
+      recognized: false,
+      status: "unknown",
+      decision: "NO RECONOCIDO",
+      title: "PRODUCTO NO RECONOCIDO",
+      product: "Fuera de lista",
+      emoji: "🚫",
+      message: `El objeto detectado no corresponde a ${ACCEPTED_PRODUCTS_TEXT}. Se enviará al descarte.`,
+      confidence,
+      quality: 0,
+      damage: 0,
+      spots: 0,
+      colorHealth: 0,
+      bbox
+    };
+  }
+
+  const productInfo = PRODUCTS[productKey];
+  const qualityResult = buildQualityByProduct(productKey, stats);
+
+  return {
+    found: true,
+    recognized: true,
+    productKey,
+    productInfo,
+    bbox,
+    confidence,
+    ...qualityResult
+  };
+}
+
+function getBadgeClass(decision) {
+  return decision.toLowerCase().replaceAll(" ", "-");
 }
 
 export default function App() {
@@ -282,7 +497,6 @@ export default function App() {
   const [error, setError] = useState("");
   const [result, setResult] = useState(EMPTY_RESULT);
 
-  const modelRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -299,12 +513,14 @@ export default function App() {
     const approved = history.filter((item) => item.decision === "APROBADO").length;
     const rejected = history.filter((item) => item.decision === "RECHAZADO").length;
     const review = history.filter((item) => item.decision === "REVISAR").length;
+    const unknown = history.filter((item) => item.decision === "NO RECONOCIDO").length;
 
     return {
       total: history.length,
       approved,
       rejected,
-      review
+      review,
+      unknown
     };
   }, [history]);
 
@@ -333,39 +549,22 @@ export default function App() {
   }, []);
 
   const loadModel = async () => {
-    if (modelRef.current) return modelRef.current;
-
     setError("");
-    setModelStatus("Cargando modelo IA...");
-    setResult({
-      ...EMPTY_RESULT,
-      status: "loading",
-      decision: "CARGANDO",
-      title: "Cargando IA",
-      message: "Preparando el modelo de reconocimiento de frutas."
-    });
+    setModelStatus("Motor visual listo");
+    setModelReady(true);
 
-    try {
-      const model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
-      modelRef.current = model;
-      setModelReady(true);
-      setModelStatus("Modelo IA listo");
+    setResult((prev) => ({
+      ...prev,
+      status: prev.status === "waiting" ? "ready" : prev.status,
+      decision: prev.decision === "ESPERANDO" ? "LISTO" : prev.decision,
+      title: prev.title === "Sin análisis" ? "Motor visual listo" : prev.title,
+      message:
+        prev.status === "waiting"
+          ? `Activa la cámara para verificar ${ACCEPTED_PRODUCTS_TEXT}.`
+          : prev.message
+    }));
 
-      setResult({
-        ...EMPTY_RESULT,
-        status: "ready",
-        decision: "LISTO",
-        title: "IA lista",
-        message: "Activa la cámara para iniciar el filtro."
-      });
-
-      return model;
-    } catch (err) {
-      console.error(err);
-      setModelStatus("Error cargando IA");
-      setError("No se pudo cargar el modelo. Revisa tu internet y las dependencias.");
-      throw err;
-    }
+    return true;
   };
 
   const loginAsDefaultAdmin = () => {
@@ -558,7 +757,7 @@ export default function App() {
         status: "ready",
         decision: "LISTO",
         title: "Cámara activa",
-        message: "Coloca una manzana, plátano o naranja frente al filtro."
+        message: `Coloca ${ACCEPTED_PRODUCTS_TEXT} frente al filtro.`
       });
     } catch (err) {
       console.error(err);
@@ -615,15 +814,15 @@ export default function App() {
     ctx.textAlign = "center";
     ctx.fillStyle = "#ffffff";
     ctx.font = "700 28px Arial";
-    ctx.fillText("Coloca una fruta en el filtro", canvas.width / 2, y + 40);
+    ctx.fillText("Coloca un producto en el filtro", canvas.width / 2, y + 40);
 
     ctx.fillStyle = "rgba(255,255,255,0.78)";
     ctx.font = "500 18px Arial";
-    ctx.fillText("Manzana · Plátano · Naranja", canvas.width / 2, y + 68);
+    ctx.fillText("Palta · Mango · Jengibre · Cúrcuma", canvas.width / 2, y + 68);
     ctx.textAlign = "left";
   };
 
-  const drawDetection = (prediction, qualityResult) => {
+  const drawDetection = (analysis) => {
     const canvas = canvasRef.current;
     if (!canvas || !syncCanvas()) return;
 
@@ -632,11 +831,13 @@ export default function App() {
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const [x, y, w, h] = prediction.bbox;
+    if (!analysis?.bbox) return;
+
+    const [x, y, w, h] = analysis.bbox;
     const color =
-      qualityResult.status === "good"
+      analysis.status === "good"
         ? "#22c55e"
-        : qualityResult.status === "bad"
+        : analysis.status === "bad" || analysis.status === "unknown"
           ? "#ef4444"
           : "#f59e0b";
 
@@ -647,7 +848,8 @@ export default function App() {
     ctx.strokeRect(x, y, w, h);
     ctx.shadowBlur = 0;
 
-    const label = `${FRUITS[prediction.class].name} · ${qualityResult.title}`;
+    const productLabel = analysis.recognized ? analysis.productInfo.name : "No reconocido";
+    const label = `${productLabel} · ${analysis.title}`;
     ctx.font = "700 28px Arial";
     const textWidth = ctx.measureText(label).width;
     const labelWidth = textWidth + 34;
@@ -663,11 +865,12 @@ export default function App() {
     ctx.fillText(label, labelX + 17, labelY - 8);
   };
 
-  const saveResultToHistory = (fruitInfo, qualityResult, confidence) => {
+  const saveResultToHistory = (productInfo, analysis) => {
     if (!currentUser) return;
-    if (!["APROBADO", "RECHAZADO", "REVISAR"].includes(qualityResult.decision)) return;
+    if (!["APROBADO", "RECHAZADO", "REVISAR", "NO RECONOCIDO"].includes(analysis.decision)) return;
 
-    const signature = `${fruitInfo.name}-${qualityResult.decision}`;
+    const productName = productInfo?.name || "No reconocido";
+    const signature = `${productName}-${analysis.decision}`;
     const now = new Date();
 
     if (lastSavedRef.current === signature && now.getTime() - lastSavedAtRef.current < 5000) {
@@ -677,8 +880,8 @@ export default function App() {
     lastSavedRef.current = signature;
     lastSavedAtRef.current = now.getTime();
 
-    // Fruta rechazada: activar servo con delay para que llegue al punto de desvío
-    if (qualityResult.decision === "RECHAZADO") {
+    // Producto rechazado o fuera de lista: activar servo con delay para que llegue al punto de desvío.
+    if (REJECT_DECISIONS.includes(analysis.decision)) {
       desviarFruta();
     }
 
@@ -692,11 +895,11 @@ export default function App() {
         id,
         fecha: now.toLocaleString("es-PE"),
         usuario: currentUser.nombre,
-        fruta: fruitInfo.name,
-        decision: qualityResult.decision,
-        calidad: qualityResult.quality,
-        danio: qualityResult.damage,
-        confianza: confidence
+        producto: productName,
+        decision: analysis.decision,
+        calidad: analysis.quality,
+        danio: analysis.damage,
+        confianza: analysis.confidence
       },
       ...prev.slice(0, 49)
     ]);
@@ -711,9 +914,8 @@ export default function App() {
     }
 
     const video = videoRef.current;
-    const model = modelRef.current;
 
-    if (!video || !model || video.readyState < 2) {
+    if (!video || video.readyState < 2) {
       animationRef.current = requestAnimationFrame(scanFrame);
       return;
     }
@@ -721,34 +923,36 @@ export default function App() {
     detectingRef.current = true;
 
     try {
-      const predictions = await model.detect(video);
-      const bestFruit = pickBestFruit(predictions);
+      const analysis = analyzeAgroProduct(video);
 
-      if (!bestFruit) {
+      if (!analysis || !analysis.found) {
         drawEmpty();
 
         setResult({
           ...EMPTY_RESULT,
           status: "searching",
-          decision: "SIN FRUTA",
-          title: "Buscando fruta",
-          message: "El sistema solo acepta manzana, plátano o naranja."
+          decision: "SIN PRODUCTO",
+          title: "Buscando producto",
+          message: `El sistema acepta: ${ACCEPTED_PRODUCTS_TEXT}.`
         });
       } else {
-        const qualityResult = analyzeFruitQuality(video, bestFruit.bbox, bestFruit.class);
-        const fruitInfo = FRUITS[bestFruit.class];
-        const confidence = Math.round(bestFruit.score * 100);
-
-        drawDetection(bestFruit, qualityResult);
+        drawDetection(analysis);
 
         setResult({
-          ...qualityResult,
-          fruit: fruitInfo.name,
-          emoji: fruitInfo.emoji,
-          confidence
+          status: analysis.status,
+          decision: analysis.decision,
+          title: analysis.title,
+          fruit: analysis.recognized ? analysis.productInfo.name : "Producto no reconocido",
+          emoji: analysis.recognized ? analysis.productInfo.emoji : "🚫",
+          message: analysis.message,
+          confidence: analysis.confidence,
+          quality: analysis.quality,
+          damage: analysis.damage,
+          spots: analysis.spots,
+          colorHealth: analysis.colorHealth
         });
 
-        saveResultToHistory(fruitInfo, qualityResult, confidence);
+        saveResultToHistory(analysis.recognized ? analysis.productInfo : null, analysis);
       }
     } catch (err) {
       console.error(err);
@@ -784,7 +988,7 @@ export default function App() {
         status: "searching",
         decision: "ESCANEANDO",
         title: "Filtro activo",
-        message: "Mantén la fruta dentro de la cámara para evaluar su estado."
+        message: "Mantén el producto dentro de la cámara para evaluar su estado."
       });
 
       animationRef.current = requestAnimationFrame(scanFrame);
@@ -800,18 +1004,17 @@ export default function App() {
         <section className="login-card">
           <div className="login-hero">
             <span className="project-pill">Cognitive Computing Project</span>
-            <div className="logo-orb">🍍</div>
-            <h1>Fruit Quality AI</h1>
+            <div className="logo-orb">🥑</div>
+            <h1>Agro Quality AI</h1>
             <p>
-              Plataforma con cámara e inteligencia artificial para verificar si una fruta está en
-              buen estado antes de pasar el filtro.
+              Plataforma con cámara e inteligencia artificial para verificar palta, mango, jengibre y cúrcuma antes de pasar el filtro.
             </p>
 
             <div className="features-row">
-              <span>🍎 Frutas</span>
-              <span>📷 Cámara</span>
-              <span>🤖 IA</span>
-              <span>✅ Calidad</span>
+              <span>🥑 Palta</span>
+              <span>🥭 Mango</span>
+              <span>🫚 Jengibre</span>
+              <span>🟠 Cúrcuma</span>
             </div>
           </div>
 
@@ -887,9 +1090,9 @@ export default function App() {
     <main className="app-page">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="logo-small">🍍</div>
+          <div className="logo-small">🥑</div>
           <div>
-            <strong>Fruit Quality AI</strong>
+            <strong>Agro Quality AI</strong>
             <span>{isAdmin ? "Administrador" : "Usuario"}</span>
           </div>
         </div>
@@ -899,7 +1102,7 @@ export default function App() {
             className={activeView === "scanner" ? "active" : ""}
             onClick={() => setActiveView("scanner")}
           >
-            📷 Verificar fruta
+            📷 Verificar producto
           </button>
 
           <button
@@ -933,9 +1136,9 @@ export default function App() {
       <section className="content">
         <header className="content-header">
           <div>
-            <span className="section-tag">Filtro inteligente de frutas</span>
+            <span className="section-tag">Filtro inteligente agroindustrial</span>
             <h1>
-              {activeView === "scanner" && "Verifica si una fruta está en buen estado"}
+              {activeView === "scanner" && "Verifica si el producto está en buen estado"}
               {activeView === "history" && "Historial de verificaciones"}
               {activeView === "users" && "Gestión de usuarios"}
             </h1>
@@ -973,7 +1176,7 @@ export default function App() {
                   <div className="camera-empty">
                     <div>📷</div>
                     <h2>Cámara apagada</h2>
-                    <p>Activa la cámara y coloca una fruta frente al filtro.</p>
+                    <p>Activa la cámara y coloca palta, mango, jengibre o cúrcuma frente al filtro.</p>
                   </div>
                 )}
 
@@ -1060,8 +1263,8 @@ export default function App() {
               </div>
 
               <div className="support-card">
-                <strong>Frutas soportadas</strong>
-                <p>Manzana, plátano y naranja. Si colocas otro objeto, el filtro lo ignora.</p>
+                <strong>Productos aceptados</strong>
+                <p>Palta, mango, jengibre y cúrcuma. Si colocas otro objeto, el sistema lo marca como NO RECONOCIDO y activa el servo de descarte.</p>
               </div>
             </aside>
           </section>
@@ -1075,16 +1278,20 @@ export default function App() {
                 <strong>{dashboardStats.total}</strong>
               </div>
               <div>
-                <span>Aprobadas</span>
+                <span>Aprobados</span>
                 <strong>{dashboardStats.approved}</strong>
               </div>
               <div>
-                <span>Rechazadas</span>
+                <span>Rechazados</span>
                 <strong>{dashboardStats.rejected}</strong>
               </div>
               <div>
                 <span>Revisar</span>
                 <strong>{dashboardStats.review}</strong>
+              </div>
+              <div>
+                <span>No reconocidos</span>
+                <strong>{dashboardStats.unknown}</strong>
               </div>
             </div>
 
@@ -1094,7 +1301,7 @@ export default function App() {
                   <tr>
                     <th>Fecha</th>
                     <th>Usuario</th>
-                    <th>Fruta</th>
+                    <th>Producto</th>
                     <th>Resultado</th>
                     <th>Calidad</th>
                     <th>Confianza</th>
@@ -1111,9 +1318,9 @@ export default function App() {
                     <tr key={item.id}>
                       <td>{item.fecha}</td>
                       <td>{item.usuario}</td>
-                      <td>{item.fruta}</td>
+                      <td>{item.producto || item.fruta}</td>
                       <td>
-                        <span className={`badge ${item.decision.toLowerCase()}`}>
+                        <span className={`badge ${getBadgeClass(item.decision)}`}>
                           {item.decision}
                         </span>
                       </td>

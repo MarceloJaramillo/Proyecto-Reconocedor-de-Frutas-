@@ -1,0 +1,32 @@
+{
+  "modelName": "Agro Quality AI",
+  "inputSize": 224,
+  "labels": [
+    "curcuma_buena",
+    "curcuma_mala",
+    "jengibre_bueno",
+    "jengibre_malo",
+    "mango_bueno",
+    "mango_malo",
+    "no_reconocido",
+    "palta_buena",
+    "palta_mala"
+  ],
+  "classes": [
+    "curcuma_buena",
+    "curcuma_mala",
+    "jengibre_bueno",
+    "jengibre_malo",
+    "mango_bueno",
+    "mango_malo",
+    "no_reconocido",
+    "palta_buena",
+    "palta_mala"
+  ],
+  "decisionRules": {
+    "goodSuffix": "_buena",
+    "badSuffix": "_mala",
+    "unknownClass": "no_reconocido",
+    "minConfidenceRecommended": 0.72
+  }
+}

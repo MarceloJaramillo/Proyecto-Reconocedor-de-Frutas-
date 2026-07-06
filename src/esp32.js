@@ -1,76 +1,89 @@
-// Dirección IP del ESP32 en la red local — cambiar según la red
-export const ESP32_IP = "10.236.170.78";
+export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+export const DELAY_CAMARA_A_SERVO = Number(import.meta.env.VITE_DELAY_SERVO_MS || 4000);
 
-// Tiempo en ms entre que la cámara detecta una fruta rechazada
-// y que el servo se activa (da tiempo a que la fruta llegue al desvío)
-export const DELAY_CAMARA_A_SERVO = 4000;
-
-// Verifica si el ESP32 está disponible en la red. Timeout de 3 segundos.
-export async function verificarESP32() {
-  console.log("[ESP32] Verificando conexión con", ESP32_IP);
+async function apiRequest(endpoint, options = {}) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    const response = await fetch(`http://${ESP32_IP}/estado`, {
-      signal: controller.signal
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
     });
-    clearTimeout(timeout);
-    const data = await response.json();
-    console.log("[ESP32] Disponible:", data);
-    return true;
-  } catch (err) {
-    console.error("[ESP32] No disponible:", err.message);
-    return false;
+
+    const data = await response.json().catch(() => ({}));
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data
+    };
+  } catch (error) {
+    console.error(`[API] Error conectando con ${API_URL}${endpoint}:`, error);
+    return {
+      ok: false,
+      status: 0,
+      error: error.message
+    };
   }
 }
 
-// Enciende el motor de la banda transportadora
+export async function verificarESP32() {
+  const result = await apiRequest("/api/hardware/status");
+  return result.ok;
+}
+
 export async function encenderBanda() {
-  console.log("[ESP32] Encendiendo banda...");
-  try {
-    const response = await fetch(`http://${ESP32_IP}/banda/on`);
-    const data = await response.json();
-    console.log("[ESP32] Banda encendida:", data);
-  } catch (err) {
-    console.error("[ESP32] Error al encender banda:", err.message);
-  }
+  return apiRequest("/api/hardware/banda/on", {
+    method: "POST",
+    body: JSON.stringify({ requestedBy: "frontend" })
+  });
 }
 
-// Apaga el motor de la banda transportadora
 export async function apagarBanda() {
-  console.log("[ESP32] Apagando banda...");
-  try {
-    const response = await fetch(`http://${ESP32_IP}/banda/off`);
-    const data = await response.json();
-    console.log("[ESP32] Banda apagada:", data);
-  } catch (err) {
-    console.error("[ESP32] Error al apagar banda:", err.message);
-  }
+  return apiRequest("/api/hardware/banda/off", {
+    method: "POST",
+    body: JSON.stringify({ requestedBy: "frontend" })
+  });
 }
 
-// Espera DELAY_CAMARA_A_SERVO ms y luego activa el servo de desvío.
-// Se llama sin await (fire-and-forget) cuando se detecta una fruta rechazada.
-export async function desviarFruta() {
-  console.log(`[ESP32] Esperando ${DELAY_CAMARA_A_SERVO}ms para que la fruta avance...`);
-  await new Promise((resolve) => setTimeout(resolve, DELAY_CAMARA_A_SERVO));
-  console.log("[ESP32] Desviando fruta defectuosa...");
-  try {
-    const response = await fetch(`http://${ESP32_IP}/desviar`, { method: "POST" });
-    const data = await response.json();
-    console.log("[ESP32] Servo activado:", data);
-  } catch (err) {
-    console.error("[ESP32] Error al desviar fruta:", err.message);
-  }
+export async function desviarFruta(payload = {}) {
+  return apiRequest("/api/hardware/desviar", {
+    method: "POST",
+    body: JSON.stringify({
+      delayMs: DELAY_CAMARA_A_SERVO,
+      immediate: false,
+      reason: payload.reason || "producto_rechazado",
+      product: payload.product || "desconocido",
+      quality: payload.quality ?? null
+    })
+  });
 }
 
-// Activa el servo inmediatamente sin delay (para pruebas manuales)
-export async function desviarInmediato() {
-  console.log("[ESP32] Activando servo (prueba manual)...");
-  try {
-    const response = await fetch(`http://${ESP32_IP}/desviar`, { method: "POST" });
-    const data = await response.json();
-    console.log("[ESP32] Servo activado (manual):", data);
-  } catch (err) {
-    console.error("[ESP32] Error al activar servo:", err.message);
-  }
+export async function desviarInmediato(payload = {}) {
+  return apiRequest("/api/hardware/desviar", {
+    method: "POST",
+    body: JSON.stringify({
+      delayMs: 0,
+      immediate: true,
+      reason: payload.reason || "prueba_manual",
+      product: payload.product || "manual",
+      quality: payload.quality ?? null
+    })
+  });
+}
+
+export async function registrarResultadoAnalisis(resultado = {}) {
+  return apiRequest("/api/scan/result", {
+    method: "POST",
+    body: JSON.stringify({
+      product: resultado.product || "desconocido",
+      decision: resultado.decision || "REVISAR",
+      quality: resultado.quality || 0,
+      damage: resultado.damage || 0,
+      confidence: resultado.confidence || 0,
+      userEmail: resultado.userEmail || "local",
+      source: "frontend"
+    })
+  });
 }

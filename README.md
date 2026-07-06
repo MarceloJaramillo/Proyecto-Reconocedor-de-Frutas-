@@ -768,6 +768,8 @@ Desarrollador:
 
 ```text
 Marcelo Jaramillo
+Huaman Tambine Jhonny Fernando
+Edgar Nasario Mendo Céspedes 
 ```
 
 ---

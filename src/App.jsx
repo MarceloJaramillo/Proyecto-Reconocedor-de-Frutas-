@@ -307,11 +307,16 @@ function analyzeAgroProduct(video) {
   const videoWidth = video.videoWidth || 1280;
   const videoHeight = video.videoHeight || 720;
 
+  // CAMBIO IMPORTANTE:
+  // Antes se analizaba una zona demasiado grande de la cámara. Por eso entraban la mano,
+  // la pared, la ropa o el fondo, y una mandarina podía terminar clasificada como palta.
+  // Ahora solo se analiza una zona central más pequeña, que es donde debe colocarse el producto.
   const sampleWidth = 260;
-  const sampleHeight = 190;
-  const cropScale = 0.78;
-  const cropW = videoWidth * cropScale;
-  const cropH = videoHeight * cropScale;
+  const sampleHeight = 220;
+  const cropScaleX = 0.48;
+  const cropScaleY = 0.56;
+  const cropW = videoWidth * cropScaleX;
+  const cropH = videoHeight * cropScaleY;
   const cropX = (videoWidth - cropW) / 2;
   const cropY = (videoHeight - cropH) / 2;
 
@@ -345,18 +350,36 @@ function analyzeAgroProduct(video) {
     maxY: 0
   };
 
+  // Para el recuadro, usamos solo colores realmente parecidos a productos agrícolas.
+  // Esto evita que el fondo o la mano agranden el bounding box.
+  const objectPixels = [];
+
   for (let y = 0; y < sampleHeight; y += 2) {
     for (let x = 0; x < sampleWidth; x += 2) {
       const nx = (x - sampleWidth / 2) / (sampleWidth / 2);
       const ny = (y - sampleHeight / 2) / (sampleHeight / 2);
       const centerWeight = nx * nx + ny * ny;
 
-      if (centerWeight > 1.05) continue;
+      // Más estricto: se ignoran las esquinas para no tomar pared, ropa o habitación.
+      if (centerWeight > 0.82) continue;
 
       const index = (y * sampleWidth + x) * 4;
       const info = getPixelInfo(data[index], data[index + 1], data[index + 2]);
 
-      if (!info.foreground) continue;
+      const agriculturalColor =
+        info.green ||
+        info.darkGreen ||
+        info.yellow ||
+        info.orange ||
+        info.red ||
+        info.beige ||
+        info.lightBrown ||
+        info.turmeric ||
+        info.veryDark ||
+        info.blackSpot ||
+        info.rottenBrown;
+
+      if (!agriculturalColor) continue;
 
       stats.foreground += 1;
       if (info.green) stats.green += 1;
@@ -372,14 +395,11 @@ function analyzeAgroProduct(video) {
       if (info.grayRot) stats.grayRot += 1;
       if (info.rottenBrown) stats.rottenBrown += 1;
 
-      stats.minX = Math.min(stats.minX, x);
-      stats.minY = Math.min(stats.minY, y);
-      stats.maxX = Math.max(stats.maxX, x);
-      stats.maxY = Math.max(stats.maxY, y);
+      objectPixels.push({ x, y, info });
     }
   }
 
-  const minForeground = 260;
+  const minForeground = 140;
   if (stats.foreground < minForeground) {
     return {
       found: false,
@@ -407,32 +427,153 @@ function analyzeAgroProduct(video) {
     red: stats.red / total,
     beige: stats.beige / total,
     lightBrown: stats.lightBrown / total,
-    turmeric: stats.turmeric / total
+    turmeric: stats.turmeric / total,
+    veryDark: stats.veryDark / total,
+    blackSpot: stats.blackSpot / total,
+    grayRot: stats.grayRot / total,
+    rottenBrown: stats.rottenBrown / total
   };
+
+  const colorGroups = {
+    greenGroup: ratios.green + ratios.darkGreen,
+    warmGroup: ratios.yellow + ratios.orange + ratios.red,
+    rootGroup: ratios.beige + ratios.lightBrown,
+    orangeRootGroup: ratios.turmeric + ratios.orange + ratios.yellow * 0.35,
+    damageGroup: ratios.veryDark + ratios.blackSpot + ratios.grayRot * 0.6 + ratios.rottenBrown
+  };
+
+  // Determinamos el grupo dominante. Luego calculamos forma/bounding box solo con ese grupo.
+  // Así una mano o un fondo verdoso no contaminan el producto.
+  let dominantGroup = "unknown";
+  let dominantValue = 0;
+  const candidates = [
+    ["green", colorGroups.greenGroup],
+    ["warm", colorGroups.warmGroup],
+    ["root", colorGroups.rootGroup],
+    ["orangeRoot", colorGroups.orangeRootGroup]
+  ];
+
+  for (const [name, value] of candidates) {
+    if (value > dominantValue) {
+      dominantGroup = name;
+      dominantValue = value;
+    }
+  }
+
+  const isDominantPixel = (info) => {
+    if (dominantGroup === "green") return info.green || info.darkGreen;
+    if (dominantGroup === "warm") return info.yellow || info.orange || info.red;
+    if (dominantGroup === "root") return info.beige || info.lightBrown;
+    if (dominantGroup === "orangeRoot") return info.turmeric || info.orange || info.yellow;
+    return info.foreground;
+  };
+
+  const dominantPixels = objectPixels.filter((pixel) => isDominantPixel(pixel.info));
+  const shapePixels = dominantPixels.length >= 60 ? dominantPixels : objectPixels;
+
+  for (const pixel of shapePixels) {
+    stats.minX = Math.min(stats.minX, pixel.x);
+    stats.minY = Math.min(stats.minY, pixel.y);
+    stats.maxX = Math.max(stats.maxX, pixel.x);
+    stats.maxY = Math.max(stats.maxY, pixel.y);
+  }
 
   const widthRatio = Math.max(stats.maxX - stats.minX, 1) / sampleWidth;
   const heightRatio = Math.max(stats.maxY - stats.minY, 1) / sampleHeight;
-  const objectPresence = clamp(stats.foreground / (sampleWidth * sampleHeight * 0.25), 0, 1);
-  const ovalBonus = widthRatio > 0.22 && heightRatio > 0.22 ? 0.08 : 0;
-
-  const scores = {
-    avocado: clamp((ratios.green * 0.65 + ratios.darkGreen * 0.55 + ratios.lightBrown * 0.12 + ovalBonus) * 100, 0, 100),
-    mango: clamp((ratios.yellow * 0.5 + ratios.orange * 0.58 + ratios.red * 0.28 + ratios.green * 0.16 + ovalBonus) * 100, 0, 100),
-    ginger: clamp((ratios.beige * 0.65 + ratios.lightBrown * 0.58 - ratios.orange * 0.18 - ratios.green * 0.12) * 100, 0, 100),
-    turmeric: clamp((ratios.turmeric * 0.65 + ratios.orange * 0.5 + ratios.yellow * 0.18 - ratios.green * 0.18) * 100, 0, 100)
-  };
-
-  const productKey = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
-  const rawConfidence = Object.entries(scores).sort((a, b) => b[1] - a[1])[0][1];
-  const confidence = Math.round(clamp(rawConfidence * 0.9 + objectPresence * 18, 0, 99));
+  const aspectRatio = widthRatio / Math.max(heightRatio, 0.01);
+  const nearRound = aspectRatio >= 0.78 && aspectRatio <= 1.22;
+  const elongated = aspectRatio >= 1.28 || aspectRatio <= 0.76;
+  const veryElongated = aspectRatio >= 1.48 || aspectRatio <= 0.66;
+  const objectPresence = clamp(shapePixels.length / (sampleWidth * sampleHeight * 0.16), 0, 1);
 
   const x = cropX + (stats.minX / sampleWidth) * cropW;
   const y = cropY + (stats.minY / sampleHeight) * cropH;
   const w = ((stats.maxX - stats.minX) / sampleWidth) * cropW;
   const h = ((stats.maxY - stats.minY) / sampleHeight) * cropH;
-  const bbox = [clamp(x, 0, videoWidth - 1), clamp(y, 0, videoHeight - 1), clamp(w, 40, videoWidth), clamp(h, 40, videoHeight)];
 
-  if (confidence < 32) {
+  const bbox = [
+    clamp(x, cropX, cropX + cropW - 1),
+    clamp(y, cropY, cropY + cropH - 1),
+    clamp(w, 60, cropW),
+    clamp(h, 60, cropH)
+  ];
+
+  // Reglas de descarte directo.
+  // Mandarina/naranja suelen ser objetos redondos, muy anaranjados/amarillos y sin verde.
+  // Como NO forman parte de la lista de la empresa, deben salir como NO RECONOCIDO.
+  const looksLikeCitrusOrMandarin =
+    nearRound &&
+    colorGroups.warmGroup >= 0.30 &&
+    ratios.orange + ratios.yellow >= 0.28 &&
+    colorGroups.greenGroup < 0.14 &&
+    colorGroups.rootGroup < 0.30 &&
+    !veryElongated;
+
+  const looksLikeHandOrSkin =
+    colorGroups.rootGroup >= 0.46 &&
+    colorGroups.greenGroup < 0.10 &&
+    colorGroups.warmGroup < 0.28 &&
+    !veryElongated;
+
+  // Firma visual por producto permitido.
+  // Ya no se fuerza una respuesta. Si no cumple una firma, queda NO RECONOCIDO.
+  const signatures = {
+    avocado:
+      colorGroups.greenGroup >= 0.26 &&
+      ratios.orange < 0.18 &&
+      ratios.yellow < 0.24 &&
+      ratios.red < 0.18 &&
+      widthRatio >= 0.15 &&
+      heightRatio >= 0.15,
+
+    mango:
+      colorGroups.warmGroup >= 0.34 &&
+      !looksLikeCitrusOrMandarin &&
+      (elongated || colorGroups.greenGroup >= 0.08 || ratios.red >= 0.06) &&
+      widthRatio >= 0.18 &&
+      heightRatio >= 0.16,
+
+    ginger:
+      colorGroups.rootGroup >= 0.38 &&
+      !looksLikeHandOrSkin &&
+      ratios.orange < 0.16 &&
+      ratios.yellow < 0.20 &&
+      colorGroups.greenGroup < 0.14 &&
+      widthRatio >= 0.16 &&
+      heightRatio >= 0.12,
+
+    turmeric:
+      colorGroups.orangeRootGroup >= 0.38 &&
+      veryElongated &&
+      colorGroups.rootGroup >= 0.10 &&
+      colorGroups.greenGroup < 0.12 &&
+      !looksLikeCitrusOrMandarin
+  };
+
+  const scores = {
+    avocado: signatures.avocado
+      ? clamp((colorGroups.greenGroup * 0.9 + ratios.lightBrown * 0.08 + objectPresence * 0.12) * 100, 0, 100)
+      : 0,
+    mango: signatures.mango
+      ? clamp((ratios.yellow * 0.48 + ratios.orange * 0.45 + ratios.red * 0.28 + colorGroups.greenGroup * 0.12 + objectPresence * 0.1) * 100, 0, 100)
+      : 0,
+    ginger: signatures.ginger
+      ? clamp((ratios.beige * 0.72 + ratios.lightBrown * 0.58 + objectPresence * 0.08) * 100, 0, 100)
+      : 0,
+    turmeric: signatures.turmeric
+      ? clamp((ratios.turmeric * 0.72 + ratios.orange * 0.38 + ratios.yellow * 0.12 + objectPresence * 0.08) * 100, 0, 100)
+      : 0
+  };
+
+  const sortedScores = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const [productKey, bestScore] = sortedScores[0];
+  const secondScore = sortedScores[1]?.[1] || 0;
+  const margin = bestScore - secondScore;
+
+  const noValidSignature = !signatures.avocado && !signatures.mango && !signatures.ginger && !signatures.turmeric;
+  const weakRecognition = bestScore < 28 || margin < 6;
+
+  if (looksLikeCitrusOrMandarin || looksLikeHandOrSkin || noValidSignature || weakRecognition) {
     return {
       found: true,
       recognized: false,
@@ -441,16 +582,17 @@ function analyzeAgroProduct(video) {
       title: "PRODUCTO NO RECONOCIDO",
       product: "Fuera de lista",
       emoji: "🚫",
-      message: `El objeto detectado no corresponde a ${ACCEPTED_PRODUCTS_TEXT}. Se enviará al descarte.`,
-      confidence,
+      message: `El producto no pertenece a la lista permitida: ${ACCEPTED_PRODUCTS_TEXT}. Se activará el servo para descartarlo.`,
+      confidence: Math.round(clamp(Math.max(bestScore, dominantValue * 100) + objectPresence * 10, 35, 96)),
       quality: 0,
-      damage: 0,
-      spots: 0,
+      damage: Math.round(clamp(colorGroups.damageGroup * 100, 0, 100)),
+      spots: Math.round(clamp((ratios.veryDark + ratios.blackSpot) * 100, 0, 100)),
       colorHealth: 0,
       bbox
     };
   }
 
+  const confidence = Math.round(clamp(bestScore + objectPresence * 12 + margin * 0.5, 0, 98));
   const productInfo = PRODUCTS[productKey];
   const qualityResult = buildQualityByProduct(productKey, stats);
 
@@ -464,7 +606,6 @@ function analyzeAgroProduct(video) {
     ...qualityResult
   };
 }
-
 function getBadgeClass(decision) {
   return decision.toLowerCase().replaceAll(" ", "-");
 }

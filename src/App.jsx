@@ -267,6 +267,105 @@ async function apiRequest(endpoint, options = {}) {
   }
 }
 
+async function cloudRequest(endpoint, options = {}) {
+  try {
+    const isFormData = options.body instanceof FormData;
+
+    const response = await fetch(`${CONFIG.API_URL}${endpoint}`, {
+      ...options,
+      headers: {
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...(options.headers || {})
+      }
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    return {
+      ok: response.ok && data?.ok !== false,
+      status: response.status,
+      data,
+      error: data?.error || data?.message || ""
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      data: {},
+      error: error.message
+    };
+  }
+}
+
+function normalizeUserItem(item = {}) {
+  const email = normalizeEmail(item.email);
+  return {
+    ...item,
+    id: item.id || email || makeId(),
+    email,
+    name: item.name || "Usuario",
+    role: item.role === "Administrador" ? "Administrador" : "Usuario",
+    active: item.protected ? true : Boolean(item.active),
+    provider: item.provider || "Manual",
+    protected: Boolean(item.protected)
+  };
+}
+
+function normalizeProductItem(item = {}) {
+  const productId = item.productId || item.id || item.slug || normalizeText(item.name || "");
+  return {
+    ...item,
+    id: item.id || productId,
+    productId,
+    slug: item.slug || productId,
+    name: item.name || productId || "Producto",
+    icon: item.icon || "🌱",
+    active: item.active ?? true,
+    accepted: item.accepted ?? true,
+    goodClass: item.goodClass || `${productId}_buena`,
+    badClass: item.badClass || `${productId}_mala`,
+    description: item.description || ""
+  };
+}
+
+function normalizeImageItem(item = {}) {
+  return {
+    ...item,
+    id: item.id || item.imageId || makeId(),
+    imageId: item.imageId || item.id,
+    productId: item.productId || "",
+    productName: item.productName || item.productId || "Producto",
+    className: item.className || "",
+    url: item.url || "",
+    filename: item.filename || item.originalName || "imagen",
+    createdAt: item.createdAt || ""
+  };
+}
+
+function normalizeHistoryItem(item = {}) {
+  let date = item.date || item.createdAt || nowText();
+
+  if (item.createdAt && !item.date) {
+    try {
+      date = new Date(item.createdAt).toLocaleString("es-PE");
+    } catch {
+      date = item.createdAt;
+    }
+  }
+
+  return {
+    ...item,
+    id: item.id || item.scanId || makeId(),
+    date,
+    user: item.user || item.userEmail || "Sin usuario",
+    product: item.product || "Sin producto",
+    decision: item.decision || "REVISAR",
+    quality: Number(item.quality || 0),
+    confidence: Number(item.confidence || 0),
+    label: item.label || ""
+  };
+}
+
 function getHistoryFromStorage() {
   try {
     return JSON.parse(localStorage.getItem("agro_quality_history") || "[]");
@@ -457,6 +556,9 @@ export default function App() {
 
   const [user, setUser] = useState(null);
   const [users, setUsers] = useState(getUsersFromStorage);
+  const [products, setProducts] = useState([]);
+  const [images, setImages] = useState([]);
+  const [cloudMode, setCloudMode] = useState("verificando");
   const [view, setView] = useState("scanner");
   const [cameraOn, setCameraOn] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -475,6 +577,26 @@ export default function App() {
     role: "Usuario",
     active: true
   });
+  const [selfRegisterForm, setSelfRegisterForm] = useState({
+    name: "",
+    email: ""
+  });
+  const [manualLoginEmail, setManualLoginEmail] = useState("");
+  const [productForm, setProductForm] = useState({
+    productId: "",
+    name: "",
+    icon: "🌱",
+    goodClass: "",
+    badClass: "",
+    description: "",
+    active: true,
+    accepted: true
+  });
+  const [imageForm, setImageForm] = useState({
+    productId: "palta",
+    className: "palta_buena",
+    file: null
+  });
 
   const isAdmin = user?.role === "Administrador";
 
@@ -486,9 +608,12 @@ export default function App() {
       unknown: history.filter((item) => item.decision === "NO_RECONOCIDO").length,
       review: history.filter((item) => item.decision === "REVISAR").length,
       users: users.length,
-      activeUsers: users.filter((item) => item.active).length
+      activeUsers: users.filter((item) => item.active).length,
+      products: products.length,
+      activeProducts: products.filter((item) => item.active).length,
+      images: images.length
     };
-  }, [history, users]);
+  }, [history, users, products, images]);
 
   useEffect(() => {
     saveHistoryToStorage(history);
@@ -500,7 +625,11 @@ export default function App() {
 
   useEffect(() => {
     checkBackend();
-    const interval = setInterval(checkBackend, 10000);
+    loadCloudData(false);
+
+    const interval = setInterval(() => {
+      checkBackend();
+    }, 10000);
 
     return () => {
       clearInterval(interval);
@@ -521,6 +650,73 @@ export default function App() {
     }, 5000);
   }
 
+  async function fetchCloudUsers() {
+    const response = await cloudRequest("/api/cloud/users");
+
+    if (!response.ok) {
+      throw new Error(response.error || "No se pudieron cargar usuarios desde AWS.");
+    }
+
+    return (response.data.users || []).map(normalizeUserItem);
+  }
+
+  async function fetchCloudProducts() {
+    const response = await cloudRequest("/api/cloud/products");
+
+    if (!response.ok) {
+      throw new Error(response.error || "No se pudieron cargar productos desde AWS.");
+    }
+
+    return (response.data.products || []).map(normalizeProductItem);
+  }
+
+  async function fetchCloudImages() {
+    const response = await cloudRequest("/api/cloud/images");
+
+    if (!response.ok) {
+      throw new Error(response.error || "No se pudieron cargar imágenes desde AWS.");
+    }
+
+    return (response.data.images || []).map(normalizeImageItem);
+  }
+
+  async function fetchCloudHistory() {
+    const response = await cloudRequest("/api/cloud/scan-history");
+
+    if (!response.ok) {
+      throw new Error(response.error || "No se pudo cargar historial desde AWS.");
+    }
+
+    return (response.data.scanHistory || []).map(normalizeHistoryItem);
+  }
+
+  async function loadCloudData(showMessage = false) {
+    try {
+      const [cloudUsers, cloudProducts, cloudImages, cloudHistory] = await Promise.all([
+        fetchCloudUsers(),
+        fetchCloudProducts(),
+        fetchCloudImages(),
+        fetchCloudHistory()
+      ]);
+
+      setUsers(cloudUsers);
+      setProducts(cloudProducts);
+      setImages(cloudImages);
+      setHistory(cloudHistory);
+      setCloudMode("dynamodb-s3");
+
+      if (showMessage) {
+        setFlash("Datos sincronizados con AWS correctamente.");
+      }
+    } catch (err) {
+      console.error(err);
+      setCloudMode("local/fallback");
+      if (showMessage) {
+        setFlash(`No se pudo sincronizar con AWS: ${err.message || err}`, "error");
+      }
+    }
+  }
+
   async function loginWithGoogle() {
     setError("");
     setSuccess("");
@@ -531,22 +727,38 @@ export default function App() {
       const firebaseUser = result.user;
 
       const email = normalizeEmail(firebaseUser.email);
-      const existing = users.find((item) => normalizeEmail(item.email) === email);
+      let cloudUsers = users;
+
+      try {
+        cloudUsers = await fetchCloudUsers();
+        setUsers(cloudUsers);
+      } catch {
+        // si AWS no responde, usamos el estado actual
+      }
+
+      const existing = cloudUsers.find((item) => normalizeEmail(item.email) === email);
 
       if (!existing) {
         const pendingUser = {
-          id: makeId(),
           name: firebaseUser.displayName || "Usuario Google",
           email,
           role: "Usuario",
           active: false,
           provider: "Google",
           protected: false,
-          photoURL: firebaseUser.photoURL || "",
-          createdAt: nowText()
+          photoURL: firebaseUser.photoURL || ""
         };
 
-        setUsers((current) => [...current, pendingUser]);
+        const created = await cloudRequest("/api/cloud/users", {
+          method: "POST",
+          body: JSON.stringify(pendingUser)
+        });
+
+        if (!created.ok) {
+          throw new Error(created.error || "No se pudo registrar tu usuario en AWS.");
+        }
+
+        await loadCloudData(false);
 
         try {
           await firebase.signOut(firebase.auth);
@@ -555,7 +767,7 @@ export default function App() {
         }
 
         setFlash(
-          "Tu cuenta Google fue registrada, pero aún está pendiente. El administrador debe activarla.",
+          "Tu cuenta Google fue registrada en AWS, pero aún está pendiente. El administrador debe activarla.",
           "error"
         );
         return;
@@ -610,6 +822,94 @@ export default function App() {
     setFlash("Entraste como Usuario Demo.");
   }
 
+  async function loginWithRegisteredEmail(event) {
+    event.preventDefault();
+
+    const email = normalizeEmail(manualLoginEmail);
+
+    if (!email) {
+      setFlash("Escribe tu correo registrado.", "error");
+      return;
+    }
+
+    try {
+      const cloudUsers = await fetchCloudUsers();
+      setUsers(cloudUsers);
+
+      const existing = cloudUsers.find((item) => normalizeEmail(item.email) === email);
+
+      if (!existing) {
+        setFlash("Este correo todavía no está registrado. Primero crea tu usuario.", "error");
+        return;
+      }
+
+      if (!existing.active) {
+        setFlash("Tu usuario existe, pero aún está pendiente de activación por el administrador.", "error");
+        return;
+      }
+
+      setUser(existing);
+      setManualLoginEmail("");
+      setFlash(`Bienvenido, ${existing.name}.`);
+    } catch (err) {
+      console.error(err);
+      setFlash(`No se pudo iniciar sesión: ${err.message || err}`, "error");
+    }
+  }
+
+  async function registerOwnUser(event) {
+    event.preventDefault();
+
+    const name = selfRegisterForm.name.trim();
+    const email = normalizeEmail(selfRegisterForm.email);
+
+    if (!name || !email) {
+      setFlash("Completa tu nombre y correo para crear tu usuario.", "error");
+      return;
+    }
+
+    try {
+      const cloudUsers = await fetchCloudUsers();
+      const existing = cloudUsers.find((item) => normalizeEmail(item.email) === email);
+
+      if (existing?.active) {
+        setFlash("Este usuario ya existe y está activo. Puedes pedir acceso al administrador.", "error");
+        return;
+      }
+
+      if (existing && !existing.active) {
+        setFlash("Tu usuario ya está registrado, pero falta que el administrador lo active.", "error");
+        return;
+      }
+
+      const created = await cloudRequest("/api/cloud/users", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          email,
+          role: "Usuario",
+          active: false,
+          provider: "Registro Web"
+        })
+      });
+
+      if (!created.ok) {
+        throw new Error(created.error || "No se pudo crear tu usuario.");
+      }
+
+      setSelfRegisterForm({ name: "", email: "" });
+      await loadCloudData(false);
+
+      setFlash(
+        "Usuario creado correctamente en AWS. Ahora el administrador debe activarlo para que puedas ingresar.",
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      setFlash(`No se pudo crear el usuario: ${err.message || err}`, "error");
+    }
+  }
+
   async function logoutUser() {
     stopCamera();
 
@@ -625,7 +925,7 @@ export default function App() {
     setResult(EMPTY_RESULT);
   }
 
-  function addOrUpdateUser(event) {
+  async function addOrUpdateUser(event) {
     event.preventDefault();
 
     if (!isAdmin) {
@@ -641,56 +941,56 @@ export default function App() {
       return;
     }
 
-    const exists = users.find((item) => normalizeEmail(item.email) === email);
+    try {
+      const exists = users.find((item) => normalizeEmail(item.email) === email);
 
-    if (exists) {
-      setUsers((current) =>
-        current.map((item) => {
-          if (normalizeEmail(item.email) !== email) return item;
-
-          if (item.protected) {
-            return {
-              ...item,
-              name,
-              role: "Administrador",
-              active: true
-            };
-          }
-
-          return {
-            ...item,
+      if (exists) {
+        const updated = await cloudRequest(`/api/cloud/users/${encodeURIComponent(email)}`, {
+          method: "PUT",
+          body: JSON.stringify({
             name,
+            email,
             role: userForm.role,
             active: Boolean(userForm.active)
-          };
-        })
-      );
+          })
+        });
 
-      setFlash("Usuario actualizado correctamente.");
-    } else {
-      setUsers((current) => [
-        ...current,
-        {
-          id: makeId(),
-          name,
-          email,
-          role: userForm.role,
-          active: Boolean(userForm.active),
-          provider: "Manual",
-          protected: false,
-          createdAt: nowText()
+        if (!updated.ok) {
+          throw new Error(updated.error || "No se pudo actualizar el usuario en AWS.");
         }
-      ]);
 
-      setFlash("Usuario creado correctamente.");
+        setFlash("Usuario actualizado correctamente en AWS.");
+      } else {
+        const created = await cloudRequest("/api/cloud/users", {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            email,
+            role: userForm.role,
+            active: Boolean(userForm.active),
+            provider: "Manual"
+          })
+        });
+
+        if (!created.ok) {
+          throw new Error(created.error || "No se pudo crear el usuario en AWS.");
+        }
+
+        setFlash("Usuario creado correctamente en AWS.");
+      }
+
+      setUserForm({
+        name: "",
+        email: "",
+        role: "Usuario",
+        active: true
+      });
+
+      await loadCloudData(false);
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error guardando usuario: ${err.message || err}`, "error");
     }
-
-    setUserForm({
-      name: "",
-      email: "",
-      role: "Usuario",
-      active: true
-    });
   }
 
   function editUser(item) {
@@ -703,7 +1003,7 @@ export default function App() {
     setView("users");
   }
 
-  function toggleUserActive(item) {
+  async function toggleUserActive(item) {
     if (!isAdmin) return;
 
     if (item.protected) {
@@ -711,16 +1011,25 @@ export default function App() {
       return;
     }
 
-    setUsers((current) =>
-      current.map((userItem) =>
-        userItem.id === item.id ? { ...userItem, active: !userItem.active } : userItem
-      )
-    );
+    try {
+      const response = await cloudRequest(`/api/cloud/users/${encodeURIComponent(item.email)}/active`, {
+        method: "PATCH",
+        body: JSON.stringify({ active: !item.active })
+      });
 
-    setFlash(item.active ? "Usuario desactivado." : "Usuario activado.");
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo cambiar el estado del usuario.");
+      }
+
+      await loadCloudData(false);
+      setFlash(item.active ? "Usuario desactivado en AWS." : "Usuario activado en AWS.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error actualizando estado: ${err.message || err}`, "error");
+    }
   }
 
-  function changeUserRole(item, role) {
+  async function changeUserRole(item, role) {
     if (!isAdmin) return;
 
     if (item.protected) {
@@ -728,14 +1037,28 @@ export default function App() {
       return;
     }
 
-    setUsers((current) =>
-      current.map((userItem) => (userItem.id === item.id ? { ...userItem, role } : userItem))
-    );
+    try {
+      const response = await cloudRequest(`/api/cloud/users/${encodeURIComponent(item.email)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          ...item,
+          role
+        })
+      });
 
-    setFlash("Rol actualizado.");
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo actualizar el rol.");
+      }
+
+      await loadCloudData(false);
+      setFlash("Rol actualizado en AWS.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error actualizando rol: ${err.message || err}`, "error");
+    }
   }
 
-  function deleteUser(item) {
+  async function deleteUser(item) {
     if (!isAdmin) return;
 
     if (item.protected) {
@@ -747,15 +1070,32 @@ export default function App() {
 
     if (!confirmDelete) return;
 
-    setUsers((current) => current.filter((userItem) => userItem.id !== item.id));
-    setFlash("Usuario eliminado.");
+    try {
+      const response = await cloudRequest(`/api/cloud/users/${encodeURIComponent(item.email)}`, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo eliminar el usuario.");
+      }
+
+      await loadCloudData(false);
+      setFlash("Usuario eliminado de AWS.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error eliminando usuario: ${err.message || err}`, "error");
+    }
   }
 
   async function checkBackend() {
-    const health = await apiRequest("/api/health");
+    const health = await cloudRequest("/api/cloud/health");
     setBackendOk(health.ok);
 
-    const status = await apiRequest("/api/hardware/status");
+    if (health.ok) {
+      setCloudMode(health.data?.mode || "aws");
+    }
+
+    const status = await cloudRequest("/api/hardware/status");
     setHardwareOk(status.ok);
   }
 
@@ -1055,7 +1395,7 @@ export default function App() {
 
     setHistory((current) => [item, ...current].slice(0, 80));
 
-    apiRequest("/api/scan/result", {
+    cloudRequest("/api/cloud/scan-history", {
       method: "POST",
       body: JSON.stringify({
         product: nextResult.product,
@@ -1123,10 +1463,189 @@ export default function App() {
     }
   }
 
-  function clearHistory() {
+  async function clearHistory() {
     setHistory([]);
     localStorage.removeItem("agro_quality_history");
+
+    const response = await cloudRequest("/api/cloud/scan-history", {
+      method: "DELETE"
+    });
+
+    if (response.ok) {
+      setFlash("Historial eliminado de AWS.");
+    } else {
+      setFlash("Se limpió el historial local, pero no se pudo limpiar AWS.", "error");
+    }
   }
+
+  async function addOrUpdateProduct(event) {
+    event.preventDefault();
+
+    if (!isAdmin) {
+      setFlash("Solo el administrador puede gestionar frutas/productos.", "error");
+      return;
+    }
+
+    const name = productForm.name.trim();
+    const productId = normalizeText(productForm.productId || name).replace(/\s+/g, "_");
+
+    if (!name || !productId) {
+      setFlash("Completa el nombre del producto.", "error");
+      return;
+    }
+
+    try {
+      const exists = products.find((item) => item.productId === productId || item.id === productId);
+      const payload = {
+        productId,
+        name,
+        icon: productForm.icon || "🌱",
+        goodClass: productForm.goodClass || `${productId}_buena`,
+        badClass: productForm.badClass || `${productId}_mala`,
+        description: productForm.description || "",
+        active: Boolean(productForm.active),
+        accepted: Boolean(productForm.accepted)
+      };
+
+      const response = exists
+        ? await cloudRequest(`/api/cloud/products/${encodeURIComponent(productId)}`, {
+            method: "PUT",
+            body: JSON.stringify(payload)
+          })
+        : await cloudRequest("/api/cloud/products", {
+            method: "POST",
+            body: JSON.stringify(payload)
+          });
+
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo guardar el producto.");
+      }
+
+      setProductForm({
+        productId: "",
+        name: "",
+        icon: "🌱",
+        goodClass: "",
+        badClass: "",
+        description: "",
+        active: true,
+        accepted: true
+      });
+
+      await loadCloudData(false);
+      setFlash(exists ? "Producto actualizado en AWS." : "Producto creado en AWS.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error guardando producto: ${err.message || err}`, "error");
+    }
+  }
+
+  function editProduct(item) {
+    setProductForm({
+      productId: item.productId || item.id,
+      name: item.name || "",
+      icon: item.icon || "🌱",
+      goodClass: item.goodClass || "",
+      badClass: item.badClass || "",
+      description: item.description || "",
+      active: item.active ?? true,
+      accepted: item.accepted ?? true
+    });
+    setView("products");
+  }
+
+  async function deleteProduct(item) {
+    if (!isAdmin) return;
+
+    const productId = item.productId || item.id;
+    const confirmDelete = window.confirm(`¿Eliminar producto ${item.name}?`);
+
+    if (!confirmDelete) return;
+
+    try {
+      const response = await cloudRequest(`/api/cloud/products/${encodeURIComponent(productId)}`, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo eliminar el producto.");
+      }
+
+      await loadCloudData(false);
+      setFlash("Producto eliminado de AWS.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error eliminando producto: ${err.message || err}`, "error");
+    }
+  }
+
+  async function uploadDatasetImage(event) {
+    event.preventDefault();
+
+    if (!isAdmin) {
+      setFlash("Solo el administrador puede subir imágenes.", "error");
+      return;
+    }
+
+    if (!imageForm.productId || !imageForm.className || !imageForm.file) {
+      setFlash("Selecciona producto, clase e imagen.", "error");
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("productId", imageForm.productId);
+      formData.append("className", imageForm.className);
+      formData.append("image", imageForm.file);
+
+      const response = await cloudRequest("/api/cloud/images", {
+        method: "POST",
+        body: formData
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo subir la imagen.");
+      }
+
+      setImageForm((current) => ({ ...current, file: null }));
+      const fileInput = document.getElementById("datasetImageFile");
+      if (fileInput) fileInput.value = "";
+
+      await loadCloudData(false);
+      setFlash("Imagen subida correctamente a S3 y registrada en DynamoDB.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error subiendo imagen: ${err.message || err}`, "error");
+    }
+  }
+
+  async function deleteDatasetImage(item) {
+    if (!isAdmin) return;
+
+    const confirmDelete = window.confirm(`¿Eliminar imagen ${item.filename || item.originalName}?`);
+
+    if (!confirmDelete) return;
+
+    try {
+      const response = await cloudRequest(`/api/cloud/images/${encodeURIComponent(item.imageId || item.id)}`, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        throw new Error(response.error || "No se pudo eliminar la imagen.");
+      }
+
+      await loadCloudData(false);
+      setFlash("Imagen eliminada de S3 y DynamoDB.");
+    } catch (err) {
+      console.error(err);
+      setFlash(`Error eliminando imagen: ${err.message || err}`, "error");
+    }
+  }
+
+  const selectedImageProduct = products.find(
+    (item) => (item.productId || item.id) === imageForm.productId
+  );
 
   if (!user) {
     return (
@@ -1155,6 +1674,17 @@ export default function App() {
                 Ingresar con Google / Gmail
               </button>
 
+              <form className="manualLoginBox" onSubmit={loginWithRegisteredEmail}>
+                <input
+                  value={manualLoginEmail}
+                  onChange={(event) => setManualLoginEmail(event.target.value)}
+                  placeholder="correo registrado"
+                />
+                <button className="btn primary" type="submit">
+                  Ingresar con correo registrado
+                </button>
+              </form>
+
               <button className="btn primary" onClick={loginAsDefaultAdmin}>
                 Ingresar como Administrador Principal
               </button>
@@ -1166,6 +1696,31 @@ export default function App() {
               <button className="btn ghost" onClick={testModelPath}>
                 Probar carga del modelo
               </button>
+
+              <form className="selfRegisterBox" onSubmit={registerOwnUser}>
+                <h3>Crear mi usuario</h3>
+                <p>Tu usuario quedará pendiente hasta que el administrador lo active.</p>
+
+                <input
+                  value={selfRegisterForm.name}
+                  onChange={(event) =>
+                    setSelfRegisterForm((current) => ({ ...current, name: event.target.value }))
+                  }
+                  placeholder="Tu nombre"
+                />
+
+                <input
+                  value={selfRegisterForm.email}
+                  onChange={(event) =>
+                    setSelfRegisterForm((current) => ({ ...current, email: event.target.value }))
+                  }
+                  placeholder="tu_correo@gmail.com"
+                />
+
+                <button className="btn secondary" type="submit">
+                  Crear usuario pendiente
+                </button>
+              </form>
 
               <div className="miniInfo">
                 <strong>Administrador:</strong> {DEFAULT_ADMIN.email}
@@ -1203,9 +1758,17 @@ export default function App() {
               📋 Historial
             </button>
             {isAdmin && (
-              <button className={view === "users" ? "active" : ""} onClick={() => setView("users")}>
-                👥 Usuarios
-              </button>
+              <>
+                <button className={view === "users" ? "active" : ""} onClick={() => setView("users")}>
+                  👥 Usuarios
+                </button>
+                <button className={view === "products" ? "active" : ""} onClick={() => setView("products")}>
+                  🥭 Frutas / Productos
+                </button>
+                <button className={view === "images" ? "active" : ""} onClick={() => setView("images")}>
+                  🖼️ Imágenes
+                </button>
+              </>
             )}
             <button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>
               ⚙️ Diagnóstico
@@ -1255,11 +1818,14 @@ export default function App() {
                 {view === "scanner" && "Verificar producto agrícola"}
                 {view === "history" && "Historial de verificaciones"}
                 {view === "users" && "Administración de usuarios"}
+                {view === "products" && "Frutas y productos"}
+                {view === "images" && "Imágenes del dataset"}
                 {view === "settings" && "Diagnóstico del sistema"}
               </h1>
             </div>
 
             <div className="headerActions">
+              <button className="smallBtn" onClick={() => loadCloudData(true)}>Sincronizar AWS</button>
               <button className="smallBtn" onClick={checkBackend}>Actualizar estado</button>
               <button className="smallBtn" onClick={testModelPath}>Probar modelo</button>
             </div>
@@ -1530,6 +2096,268 @@ export default function App() {
             </section>
           )}
 
+          {view === "products" && isAdmin && (
+            <section className="usersGrid">
+              <div className="userFormCard">
+                <h2>Crear / editar fruta</h2>
+                <p>
+                  Las frutas se guardan en DynamoDB. Crear una fruta no reentrena automáticamente la IA,
+                  pero sí deja el producto listo para organizar imágenes del dataset.
+                </p>
+
+                <form onSubmit={addOrUpdateProduct}>
+                  <label>
+                    ID producto
+                    <input
+                      value={productForm.productId}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, productId: event.target.value }))
+                      }
+                      placeholder="ejemplo: naranja"
+                    />
+                  </label>
+
+                  <label>
+                    Nombre
+                    <input
+                      value={productForm.name}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, name: event.target.value }))
+                      }
+                      placeholder="Nombre del producto"
+                    />
+                  </label>
+
+                  <label>
+                    Icono
+                    <input
+                      value={productForm.icon}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, icon: event.target.value }))
+                      }
+                      placeholder="🥭"
+                    />
+                  </label>
+
+                  <label>
+                    Clase buena
+                    <input
+                      value={productForm.goodClass}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, goodClass: event.target.value }))
+                      }
+                      placeholder="ejemplo: naranja_buena"
+                    />
+                  </label>
+
+                  <label>
+                    Clase mala
+                    <input
+                      value={productForm.badClass}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, badClass: event.target.value }))
+                      }
+                      placeholder="ejemplo: naranja_mala"
+                    />
+                  </label>
+
+                  <label>
+                    Descripción
+                    <input
+                      value={productForm.description}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, description: event.target.value }))
+                      }
+                      placeholder="Descripción breve"
+                    />
+                  </label>
+
+                  <label className="checkLine">
+                    <input
+                      type="checkbox"
+                      checked={productForm.active}
+                      onChange={(event) =>
+                        setProductForm((current) => ({ ...current, active: event.target.checked }))
+                      }
+                    />
+                    Producto activo
+                  </label>
+
+                  <button className="btn primary" type="submit">
+                    Guardar producto
+                  </button>
+                </form>
+              </div>
+
+              <div className="usersListCard">
+                <div className="tableHeader">
+                  <h2>Productos registrados</h2>
+                  <div className="miniStats">
+                    {stats.activeProducts}/{stats.products} activos
+                  </div>
+                </div>
+
+                <div className="tableCard">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Producto</th>
+                        <th>ID</th>
+                        <th>Clase buena</th>
+                        <th>Clase mala</th>
+                        <th>Estado</th>
+                        <th>Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {products.length === 0 && (
+                        <tr>
+                          <td colSpan="6">Aún no hay productos registrados.</td>
+                        </tr>
+                      )}
+
+                      {products.map((item) => (
+                        <tr key={item.productId || item.id}>
+                          <td>
+                            <strong>{item.icon} {item.name}</strong>
+                          </td>
+                          <td>{item.productId || item.id}</td>
+                          <td>{item.goodClass}</td>
+                          <td>{item.badClass}</td>
+                          <td>
+                            <span className={item.active ? "state active" : "state inactive"}>
+                              {item.active ? "Activo" : "Inactivo"}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="rowActions">
+                              <button className="smallBtn" onClick={() => editProduct(item)}>
+                                Editar
+                              </button>
+                              <button className="smallBtn danger" onClick={() => deleteProduct(item)}>
+                                Eliminar
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {view === "images" && isAdmin && (
+            <section className="usersGrid">
+              <div className="userFormCard">
+                <h2>Subir imagen al dataset</h2>
+                <p>
+                  La imagen se guarda en S3 y su información se registra en DynamoDB.
+                  Esto no reentrena el modelo automáticamente.
+                </p>
+
+                <form onSubmit={uploadDatasetImage}>
+                  <label>
+                    Producto
+                    <select
+                      value={imageForm.productId}
+                      onChange={(event) => {
+                        const nextProductId = event.target.value;
+                        const selected = products.find((item) => (item.productId || item.id) === nextProductId);
+                        setImageForm((current) => ({
+                          ...current,
+                          productId: nextProductId,
+                          className: selected?.goodClass || `${nextProductId}_buena`
+                        }));
+                      }}
+                    >
+                      {products.map((item) => (
+                        <option key={item.productId || item.id} value={item.productId || item.id}>
+                          {item.icon} {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Clase
+                    <select
+                      value={imageForm.className}
+                      onChange={(event) =>
+                        setImageForm((current) => ({ ...current, className: event.target.value }))
+                      }
+                    >
+                      {selectedImageProduct?.goodClass && (
+                        <option value={selectedImageProduct.goodClass}>
+                          {selectedImageProduct.goodClass}
+                        </option>
+                      )}
+                      {selectedImageProduct?.badClass && (
+                        <option value={selectedImageProduct.badClass}>
+                          {selectedImageProduct.badClass}
+                        </option>
+                      )}
+                      <option value="no_reconocido">no_reconocido</option>
+                    </select>
+                  </label>
+
+                  <label>
+                    Imagen
+                    <input
+                      id="datasetImageFile"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={(event) =>
+                        setImageForm((current) => ({
+                          ...current,
+                          file: event.target.files?.[0] || null
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <button className="btn primary" type="submit">
+                    Subir imagen a AWS
+                  </button>
+                </form>
+              </div>
+
+              <div className="usersListCard">
+                <div className="tableHeader">
+                  <h2>Imágenes registradas</h2>
+                  <div className="miniStats">{stats.images} imágenes</div>
+                </div>
+
+                <div className="imageGrid">
+                  {images.length === 0 && (
+                    <div className="emptyBox">Aún no hay imágenes registradas.</div>
+                  )}
+
+                  {images.map((item) => (
+                    <article className="imageCard" key={item.imageId || item.id}>
+                      {item.url ? (
+                        <img src={item.url} alt={item.filename || item.className} />
+                      ) : (
+                        <div className="imagePlaceholder">Sin vista previa</div>
+                      )}
+
+                      <div>
+                        <strong>{item.productName || item.productId}</strong>
+                        <span>{item.className}</span>
+                        <small>{item.filename}</small>
+                      </div>
+
+                      <button className="smallBtn danger" onClick={() => deleteDatasetImage(item)}>
+                        Eliminar
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </section>
+          )}
+
           {view === "settings" && (
             <section className="diagnosticGrid">
               <div className="diagnosticCard">
@@ -1539,6 +2367,10 @@ export default function App() {
                 <p><strong>Metadata:</strong> {CONFIG.METADATA_URL}</p>
                 <p><strong>Confianza mínima:</strong> {Math.round(CONFIG.MIN_CONFIDENCE * 100)}%</p>
                 <p><strong>Delay servo:</strong> {CONFIG.SERVO_DELAY_MS} ms</p>
+                <p><strong>Modo cloud:</strong> {cloudMode}</p>
+                <p><strong>Usuarios AWS:</strong> {stats.users}</p>
+                <p><strong>Productos AWS:</strong> {stats.products}</p>
+                <p><strong>Imágenes AWS:</strong> {stats.images}</p>
               </div>
 
               <div className="diagnosticCard">
@@ -2151,6 +2983,67 @@ function AppStyles() {
       .diagnosticCard .btn {
         width: 100%;
         margin-top: 10px;
+      }
+
+      .selfRegisterBox, .manualLoginBox {
+        display: grid;
+        gap: 10px;
+        padding: 14px;
+        border: 1px solid #dbece2;
+        border-radius: 18px;
+        background: #f8fafc;
+      }
+      .selfRegisterBox h3 {
+        margin: 0;
+      }
+      .selfRegisterBox p {
+        margin: 0 0 4px;
+        font-size: 13px;
+      }
+
+      .imageGrid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+        gap: 14px;
+      }
+      .imageCard {
+        display: grid;
+        gap: 10px;
+        padding: 12px;
+        border: 1px solid #e5eee8;
+        border-radius: 18px;
+        background: #f8fafc;
+      }
+      .imageCard img, .imagePlaceholder {
+        width: 100%;
+        aspect-ratio: 1 / 0.75;
+        border-radius: 14px;
+        object-fit: cover;
+        background: #eaf5ee;
+      }
+      .imagePlaceholder {
+        display: grid;
+        place-items: center;
+        color: #64746a;
+        font-weight: 900;
+      }
+      .imageCard strong, .imageCard span, .imageCard small {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+      .imageCard span {
+        color: #166534;
+        font-weight: 900;
+      }
+      .imageCard small {
+        color: #64746a;
+      }
+      .emptyBox {
+        padding: 20px;
+        border: 1px dashed #cfe1d6;
+        border-radius: 18px;
+        color: #64746a;
+        font-weight: 900;
       }
 
       @media (max-width: 1120px) {
